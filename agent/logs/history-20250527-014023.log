@@ -1,0 +1,3 @@
+The civilization information for each player and the winners of a game are extracted during game replay parsing, which is done in the function `parse_replay_full()` found in the `utils.replay_parser` module as indicated in `parse_replay.py` file. The parsed data is included into the `parsed` dictionary, which then is used for further processing.
+
+This information comes from recorded game files, which are the source of data input for the `mgz` library parsers. However, the exact code locations where these particular data are extracted aren't provided in the given context.

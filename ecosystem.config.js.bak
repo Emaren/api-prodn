@@ -1,0 +1,19 @@
+module.exports = {
+  apps: [
+    {
+      name       : "api-prod",
+      cwd        : "/var/www/api-prod",
+
+      exec_interpreter: "/var/www/api-prod/venv/bin/python3",
+      script     : "-m",
+      args       : "uvicorn app:app --host 0.0.0.0 --port 8002",
+
+      env: {
+        GOOGLE_APPLICATION_CREDENTIALS: "/var/www/api-prod/secrets/serviceAccountKey.json",
+        GOOGLE_CLOUD_PROJECT: "aoe2hd"
+      },
+
+      restart_delay: 500
+    }
+  ]
+};

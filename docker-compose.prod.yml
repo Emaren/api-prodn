@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:17
+    container_name: aoe2-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: aoe2user
+      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_DB: aoe2db
+    volumes:
+      - aoe2db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aoe2user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: aoe2-pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@aoe2.com
+      PGADMIN_DEFAULT_PASSWORD: adminpass
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - db
+
+  backend:
+    build:
+      context: .              # ✅ Fixed path (you are already inside aoe2hd-parsing)
+      dockerfile: Dockerfile
+    container_name: aoe2-backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aoe2user:secretpassword@db:5432/aoe2db
+      ADMIN_TOKEN: secretadmin
+      ENABLE_DEV_ENDPOINTS: "false"
+    ports:
+      - "8002:8002"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+
+  frontend:
+    build:
+      context: ../aoe2hd-frontend
+      dockerfile: Dockerfile
+    container_name: aoe2-frontend
+    restart: always
+    environment:
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  aoe2db_data:
+  pgadmin_data:

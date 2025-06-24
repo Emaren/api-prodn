@@ -1,0 +1,5 @@
+services:
+  aoe2-backend:
+    image: aoe2hd-parsing-backend
+    volumes:
+      - "/Users/tonyblum/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Age2HD/SaveGame:/replays"

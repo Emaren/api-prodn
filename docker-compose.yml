@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:17
+    container_name: aoe2-postgres
+    environment:
+      POSTGRES_USER: aoe2user
+      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_DB: aoe2db
+    ports:
+      - "5432:5432"
+    volumes:
+      - aoe2db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aoe2user"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: aoe2-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@aoe2.com
+      PGADMIN_DEFAULT_PASSWORD: adminpass
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - db
+
+volumes:
+  aoe2db_data:
+  pgadmin_data:

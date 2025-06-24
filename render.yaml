@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: aoe2hd-backend
+    env: docker
+    repo: https://github.com/emaren/aoe2hd-parsing
+    branch: main
+    plan: free
+    autoDeploy: true
+    dockerContext: .
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aoe2hd-db
+          property: connectionString
+      - key: ENV
+        value: production
+
+databases:
+  - name: aoe2hd-db
+    plan: free

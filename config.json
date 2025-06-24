@@ -1,0 +1,14 @@
+{
+  "replay_directories": [
+    "/Users/tonyblum/Library/Application Support/CrossOver/Bottles/Steam/drive_c/users/crossover/Games/Age of Empires 2 DE/76561198065420384/SaveGame",
+    "/Users/tonyblum/Library/Application Support/CrossOver/Bottles/Steam/drive_c/users/crossover/Games/Age of Empires 2 DE/0/SaveGame",
+    "/Users/tonyblum/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Age2HD/SaveGame"
+  ],
+  "api_targets": ["local", "render"],
+  "polling_interval": 1,
+  "use_polling": true,
+  "logging_level": "DEBUG",
+  "stable_time_seconds": 60,
+
+  "DATABASE_URL": "postgresql+asyncpg://aoe2user:secretpassword@localhost:5432/aoe2db"
+}

@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "deploy": "curl -X POST 'https://api.render.com/deploy/srv-cvo1gk6uk2gs73bgjlb0?key=OvfEG8KeYyI'"
+  },
+  "dependencies": {
+    "@cosmjs/amino": "^0.33.1",
+    "@cosmjs/stargate": "^0.33.1",
+    "@cosmos-kit/core": "^2.16.0",
+    "@cosmos-kit/keplr": "^2.15.0",
+    "firebase": "^11.6.0"
+  }
+}
