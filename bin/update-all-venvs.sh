@@ -1,0 +1,1 @@
+/Users/tonyblum/projects/llama-scripts/bin/update-all-venvs.sh
