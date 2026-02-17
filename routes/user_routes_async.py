@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Depends, Body, status, Request
@@ -19,6 +20,10 @@ from db.models import User, GameStats
 router = APIRouter(prefix="/api/user", tags=["user"])
 
 bearer_scheme = HTTPBearer(auto_error=False)
+ALLOW_UNVERIFIED_BEARER_IDENTITY = os.getenv(
+    "ALLOW_UNVERIFIED_BEARER_IDENTITY",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 def _token_from_request(
     request: Request,
@@ -51,6 +56,9 @@ def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
 
 
 def _identity_from_bearer_token(token: str | None) -> dict[str, str | None] | None:
+    if not ALLOW_UNVERIFIED_BEARER_IDENTITY:
+        return None
+
     if not token:
         return None
 
@@ -69,6 +77,20 @@ def _identity_from_bearer_token(token: str | None) -> dict[str, str | None] | No
     return None
 
 
+def _normalize_uid(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_email(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def resolve_request_identity(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = None,
@@ -85,8 +107,10 @@ def resolve_request_identity(
     if token_identity and token_identity.get("uid"):
         return token_identity
 
-    uid = request.headers.get("x-user-uid") or fallback_uid
-    email = request.headers.get("x-user-email") or fallback_email
+    uid = _normalize_uid(request.headers.get("x-user-uid")) or _normalize_uid(fallback_uid)
+    email = _normalize_email(request.headers.get("x-user-email")) or _normalize_email(
+        fallback_email
+    )
     if uid:
         return {"uid": uid, "email": email}
     return None

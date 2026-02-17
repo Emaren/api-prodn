@@ -47,6 +47,9 @@ Optional/common:
 - `CHAIN_ID`
 - `ALLOWED_ORIGINS`
 - `TRAFFIC_STATE_DIR` (default: `runtime/` in repo root)
+- `AOE2_API_BASE_URL` (used by `parse_replay.py` for non-local targets; default `https://api-prodn.aoe2hdbets.com`)
+- `LOG_REQUESTS=true` to enable request-line logging (disabled by default in production)
+- `ALLOW_UNVERIFIED_BEARER_IDENTITY=true` only for legacy compatibility; keep disabled in production
 - `AUTO_CREATE_TABLES=true` (local-only convenience; default is disabled to avoid schema drift)
 
 ## Migrations

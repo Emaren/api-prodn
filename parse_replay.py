@@ -22,10 +22,16 @@ api_targets = get_api_targets() or config.get("api_targets", ["local"])
 LOGGING_LEVEL = os.environ.get("LOGGING_LEVEL", config.get("logging_level", "DEBUG")).upper()
 logging.basicConfig(level=getattr(logging, LOGGING_LEVEL, logging.DEBUG))
 
+PRODUCTION_API_BASE = (
+    os.environ.get("AOE2_API_BASE_URL")
+    or config.get("aoe2_api_base_url")
+    or "https://api-prodn.aoe2hdbets.com"
+).rstrip("/")
+
 ENDPOINTS = {
     "local": "http://localhost:8002/api/parse_replay",
-    "render": "https://aoe2hdbets.com/api/parse_replay",
-    "production": "https://aoe2hdbets.com/api/parse_replay",
+    "render": f"{PRODUCTION_API_BASE}/api/parse_replay",
+    "production": f"{PRODUCTION_API_BASE}/api/parse_replay",
 }
 
 # ───────────────────────────────────────────────
@@ -96,16 +102,19 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
 
             if response.ok:
                 logging.info(f"✅ [{target}] Response: {response.status_code} - {response.text}")
-            elif response.status_code == 401 and is_final and not api_key:
+            elif response.status_code in {404, 405} and is_final:
                 fallback_url = full_url.replace("/api/parse_replay", "/api/replay/upload")
                 logging.warning(
-                    f"🔁 [{target}] JSON route unauthorized; retrying final upload as file → {fallback_url}"
+                    f"🔁 [{target}] JSON route unavailable; retrying final upload as file → {fallback_url}"
                 )
+                upload_headers = {"x-user-uid": user_uid}
+                if api_key:
+                    upload_headers["x-api-key"] = api_key
                 with open(replay_path, "rb") as replay_handle:
                     fallback = requests.post(
                         fallback_url,
                         files={"file": (os.path.basename(replay_path), replay_handle)},
-                        headers={"x-user-uid": user_uid},
+                        headers=upload_headers,
                         timeout=90,
                     )
                 if fallback.ok:
@@ -140,7 +149,11 @@ async def main():
                 logging.warning(f"⚠️ Missing: {path}")
                 continue
 
-            files = [f for f in os.listdir(path) if f.endswith(".aoe2record") or f.endswith(".mgz")]
+            files = [
+                f
+                for f in os.listdir(path)
+                if f.endswith((".aoe2record", ".aoe2mpgame", ".mgz", ".mgx", ".mgl"))
+            ]
             files.sort(key=lambda f: extract_datetime_from_filename(f) or datetime.min, reverse=True)
 
             for fname in files:

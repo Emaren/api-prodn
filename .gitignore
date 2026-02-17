@@ -33,6 +33,24 @@ scripts/ip_country.json
 scripts/ip_visit_counts.json
 scripts/seen_log_line_hashes.json
 runtime/
+instance/
 
 # Legacy local secret
 serviceAccountKey.json
+
+# Local research / dump artifacts
+aoe2_chunk.bin
+aoe2_hex.txt
+aoe2db_backup_*.sql
+aoe2db_clean_*.dump
+decompressed_chunks/
+parsed_blocks*.csv
+anomalous_blocks.csv
+salvage.json
+strings_output.txt
+users.csv
+users.json
+xor_out.bin
+freeze-diff.txt
+req-diff.txt
+SELECT

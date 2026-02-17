@@ -5,6 +5,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.future import select
 import logging
 import os
+import time
 
 from db.db import init_db_async, get_db
 from db.models import GameStats
@@ -24,42 +25,58 @@ from routes import (
     traffic_route,
 )
 
-print(f"DATABASE_URL: {os.getenv('DATABASE_URL')}")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("aoe2hdbets.api")
+
+
+def _parse_allowed_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://localhost:3002",
+            "https://aoe2-betting.vercel.app",
+            "https://aoe2hdbets.com",
+            "https://www.aoe2hdbets.com",
+            "https://app-staging.aoe2hdbets.com",
+        ]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+LOG_REQUESTS = _env_bool("LOG_REQUESTS", default=False)
+ALLOWED_ORIGINS = _parse_allowed_origins()
 
 class LogRequestMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        print(f"📩 Incoming Request: {request.method} {request.url}")
+        if not LOG_REQUESTS:
+            return await call_next(request)
 
-        # Prefer the new headers you’re actually using now
-        if "x-api-key" in request.headers:
-            print(f"🔑 x-api-key present (len={len(request.headers['x-api-key'])})")
-        else:
-            print("⚠️ No x-api-key header present.")
-
-        if "x-user-uid" in request.headers:
-            print(f"👤 x-user-uid: {request.headers['x-user-uid']}")
-
-        # Keep Authorization preview if you still sometimes send it
-        if "authorization" in request.headers:
-            token_preview = request.headers["authorization"][:40]
-            print(f"🔒 Authorization (first 40 chars): {token_preview}...")
-
-        return await call_next(request)
+        start = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "%s %s -> %s (%.1fms)",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
 
 app = FastAPI()
 app.add_middleware(LogRequestMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
-        "https://aoe2-betting.vercel.app",
-        "https://aoe2hdbets.com",
-        "https://www.aoe2hdbets.com",
-        "https://app-staging.aoe2hdbets.com",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,9 +85,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     await init_db_async()
-
-    for route in app.routes:
-        print(f"✅ {route.path}")
+    logger.info("API startup complete. Routes=%s", len(app.routes))
 
 app.include_router(user_routes_async.router)
 app.include_router(user_register.router)

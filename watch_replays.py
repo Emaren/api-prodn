@@ -130,7 +130,7 @@ def watch_replay(path):
 # ───────────────────────────────────────────────
 class Handler(FileSystemEventHandler):
     def handle(self, path):
-        if not path.endswith((".aoe2record", ".aoe2mpgame", ".mgz")) or "Out of Sync" in path:
+        if not path.endswith((".aoe2record", ".aoe2mpgame", ".mgz", ".mgx", ".mgl")) or "Out of Sync" in path:
             return
         with LOCK:
             if path not in ACTIVE:
