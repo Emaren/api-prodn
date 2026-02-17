@@ -1,42 +1,56 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 🧠 Always absolute paths to be safe
-BACKEND_DIR="$HOME/projects/AoE2HDBets/api-prodn"
-FRONTEND_DIR="$HOME/projects/AoE2HDBets/app-prodn"
+ROOT_DIR="${ROOT_DIR:-$HOME/projects/AoE2HDBets}"
+REPOS=("app-prodn" "api-prodn" "aoe2-watcher")
+BRANCH="${BRANCH:-main}"
 
-# 1. Git push frontend
-echo "🧼 Pushing frontend..."
-cd "$FRONTEND_DIR" || exit 1
-git add .
-git commit -m "🚀 Frontend prod deploy" || echo "✅ No changes to commit in frontend."
-git push origin main
+push_repo() {
+  local repo="$1"
+  local repo_dir="$ROOT_DIR/$repo"
 
-# 2. Git push backend
-echo "🧼 Pushing backend..."
-cd "$BACKEND_DIR" || exit 1
-git add .
-git commit -m "🚀 Backend prod deploy" || echo "✅ No changes to commit in backend."
-git push origin main
+  if [[ ! -d "$repo_dir/.git" ]]; then
+    echo "↷ Skipping $repo (not a git repo at $repo_dir)"
+    return
+  fi
 
-# Inject production secrets and generate .env.production
-export FRONTEND_URL="https://aoe2-betting.vercel.app"
-export ENABLE_REALTIME=true
-export SHOW_DEBUG_UI=false
-export DATABASE_URL="postgresql+asyncpg://aoe2db_user:your-password@your-db-host:5432/aoe2db"
-export ADMIN_TOKEN="your_secure_admin_token"
-export FASTAPI_URL="https://aoe2hdbets.com/api/parse_replay"
-export API_TARGETS="https://aoe2hdbets.com/api/parse_replay"
+  cd "$repo_dir"
+  local remote
+  remote="$(git remote | head -n1 || true)"
+  if [[ -z "$remote" ]]; then
+    echo "↷ Skipping $repo (no git remote configured)"
+    return
+  fi
 
-bash scripts/generate_env.sh
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "✖ $repo has uncommitted changes. Commit or stash first."
+    exit 1
+  fi
 
-# 3. Alembic DB migration
-echo "🛠️ Applying Alembic migrations to Render database..."
-export ENV=production
-set -a
-source "$BACKEND_DIR/.env.production"
-set +a
-export PYTHONPATH="$BACKEND_DIR"
-alembic upgrade head
-echo "✅ Alembic migrations applied successfully!"
+  echo "↑ Pushing $repo ($remote/$BRANCH)"
+  git push "$remote" "$BRANCH"
+}
 
-echo "🎉 All systems go. Full prod deploy complete."
+for repo in "${REPOS[@]}"; do
+  push_repo "$repo"
+done
+
+if [[ -n "${VPS_HOST:-}" ]]; then
+  VPS_PATH="${VPS_PATH:-/var/www/AoE2HDBets}"
+  echo "⇣ Pulling latest on VPS: $VPS_HOST ($VPS_PATH)"
+  ssh "$VPS_HOST" "\
+    set -euo pipefail; \
+    cd '$VPS_PATH/app-prodn' && git pull --ff-only origin '$BRANCH'; \
+    cd '$VPS_PATH/api-prodn' && git pull --ff-only origin '$BRANCH'; \
+    if [ -d '$VPS_PATH/aoe2-watcher/.git' ]; then cd '$VPS_PATH/aoe2-watcher' && git pull --ff-only origin '$BRANCH'; fi"
+  echo "✔ VPS repos updated. Restart your services/process manager next."
+else
+  cat <<EOF
+No VPS host configured. To pull on your VPS manually:
+  cd /var/www/AoE2HDBets/app-prodn && git pull --ff-only origin $BRANCH
+  cd /var/www/AoE2HDBets/api-prodn && git pull --ff-only origin $BRANCH
+  cd /var/www/AoE2HDBets/aoe2-watcher && git pull --ff-only origin $BRANCH
+
+Then restart your frontend/backend processes.
+EOF
+fi
