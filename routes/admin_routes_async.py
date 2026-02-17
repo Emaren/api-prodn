@@ -17,7 +17,9 @@ def verify_admin_token(
     x_admin_token: str = Header(None, alias="X-Admin-Token"),
 ):
     token = x_admin_token or (authorization.replace("Bearer ", "") if authorization else "")
-    expected = os.getenv("ADMIN_TOKEN", "secretadmin")
+    expected = os.getenv("ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=500, detail="ADMIN_TOKEN is not configured")
     if token != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
 

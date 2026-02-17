@@ -33,6 +33,7 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8002
 Required:
 
 - `DATABASE_URL` (`postgresql+asyncpg://...`)
+- `ADMIN_TOKEN` (required for `/api/admin/*` routes)
 
 Optional/common:
 
