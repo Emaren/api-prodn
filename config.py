@@ -1,9 +1,11 @@
 import json
 import os
+import logging
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 env_loaded = False
+logger = logging.getLogger("aoe2hdbets.config")
 
 def _resolve_env(default: str = "development") -> str:
     current = os.getenv("ENV")
@@ -21,9 +23,9 @@ if dotenv_override:
     if os.path.exists(dotenv_path):
         load_dotenv(dotenv_path=dotenv_path)
         env_loaded = True
-        print(f"✅ Loaded dotenv from DOTENV_CONFIG_PATH: {dotenv_path}")
+        logger.info("Loaded dotenv from DOTENV_CONFIG_PATH: %s", dotenv_path)
     else:
-        print(f"⚠️ DOTENV_CONFIG_PATH not found: {dotenv_path}")
+        logger.warning("DOTENV_CONFIG_PATH not found: %s", dotenv_path)
 
 # Get ENV after optional override load
 ENV = _resolve_env()
@@ -33,7 +35,7 @@ override_path = os.path.join(BASE_DIR, ".env.override")
 if ENV != "production" and os.path.exists(override_path):
     load_dotenv(dotenv_path=override_path)
     env_loaded = True
-    print("✅ Loaded override from .env.override (dev only)")
+    logger.info("Loaded override from .env.override (dev only)")
 
 # ✅ 2. Load env-specific file (production/dev/etc)
 if not env_loaded:
@@ -47,9 +49,9 @@ if not env_loaded:
     if os.path.exists(env_path):
         load_dotenv(dotenv_path=env_path)
         env_loaded = True
-        print(f"✅ Loaded environment: {ENV} from {env_file}")
+        logger.info("Loaded environment: %s from %s", ENV, env_file)
     else:
-        print(f"⚠️ No env file found for {ENV}. Proceeding with defaults.")
+        logger.warning("No env file found for %s. Proceeding with defaults.", ENV)
 
 # Re-resolve ENV in case file load changed it.
 ENV = _resolve_env(default=ENV)
@@ -58,7 +60,7 @@ ENV = _resolve_env(default=ENV)
 local_path = os.path.join(BASE_DIR, ".env.local")
 if ENV == "development" and os.path.exists(local_path):
     load_dotenv(dotenv_path=local_path, override=True)
-    print("✅ Loaded .env.local (final override layer for dev)")
+    logger.info("Loaded .env.local (final override layer for dev)")
 
 # --- Exports ---
 def get_fastapi_api_url():
@@ -82,7 +84,4 @@ def load_config():
     except Exception as e:
         raise RuntimeError(f"❌ Failed to load config.json: {e}")
 
-# ✅ Debug print
-print(f"🚀 ENV is: {ENV}")
-print(f"🌐 FASTAPI_API_URL is: {os.getenv('FASTAPI_API_URL')}")
-print(f"🐘 DATABASE_URL: {os.getenv('DATABASE_URL')}")
+logger.info("Config initialized for ENV=%s", ENV)

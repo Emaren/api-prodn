@@ -4,7 +4,7 @@ import ssl
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-import config  # triggers layered .env loading and debug output
+import config  # triggers layered .env loading
 
 # ────────────────────────────────────────────────────────────────
 # 🛠 Fix DATABASE_URL scheme if Render injects 'postgres://'
