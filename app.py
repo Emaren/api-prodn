@@ -10,13 +10,19 @@ import os
 from db.db import init_db_async, get_db
 from db.models import GameStats
 
-# Core routes are always enabled.
+# Core + user routes are always enabled.
 from routes import (
+    user_me,
+    user_routes_async,
+    user_register,
     replay_routes_async,
     debug_routes_async,
     admin_routes_async,
     bets,
+    user_ping,
+    user_exists,
     chain_id,
+    traffic_route,
 )
 
 print(f"DATABASE_URL: {os.getenv('DATABASE_URL')}")
@@ -65,30 +71,30 @@ app.add_middleware(
 async def startup_event():
     await init_db_async()
 
-    # Firebase-backed routes are optional: enable only when credentials are usable.
+    # Best-effort Firebase init for environments that still have it.
     try:
         initialize_firebase = import_module("firebase_utils").initialize_firebase
         initialize_firebase()
-        from routes import user_routes_async, user_register, user_ping, traffic_route
-
-        app.include_router(user_routes_async.router)
-        app.include_router(user_register.router)
-        app.include_router(user_ping.router)
-        app.include_router(traffic_route.router)
-        logging.getLogger(__name__).info("✅ Firebase-backed routes enabled")
+        logging.getLogger(__name__).info("✅ Firebase initialized")
     except Exception as exc:
         logging.getLogger(__name__).warning(
-            "⚠️ Firebase init failed; running without Firebase-backed routes: %s", exc
+            "⚠️ Firebase init skipped/unavailable: %s", exc
         )
 
     for route in app.routes:
         print(f"✅ {route.path}")
 
+app.include_router(user_routes_async.router)
+app.include_router(user_register.router)
+app.include_router(user_me.router)
 app.include_router(replay_routes_async.router)
 app.include_router(debug_routes_async.router)
 app.include_router(admin_routes_async.router)
 app.include_router(bets.router)
+app.include_router(user_ping.router)
+app.include_router(user_exists.router)
 app.include_router(chain_id.router)
+app.include_router(traffic_route.router)
 
 @app.get("/")
 def root():

@@ -3,6 +3,6 @@
 from pydantic import BaseModel
 
 class UserRegisterRequest(BaseModel):
-    uid: str
-    email: str
+    uid: str | None = None
+    email: str | None = None
     in_game_name: str

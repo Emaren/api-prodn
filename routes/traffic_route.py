@@ -1,19 +1,31 @@
-from fastapi import APIRouter, Depends
-from firebase_admin import auth
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from db.db import get_db
-from db.models import User
-import subprocess, os, re, json
+import os
+import re
+import json
+import subprocess
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta
+from pathlib import Path
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from db.db import get_db
+from db.models import User
+
+try:
+    from firebase_admin import auth as fb_auth
+except Exception:
+    fb_auth = None
 
 router = APIRouter()
 
 LOG_PATH = "/var/log/nginx/access.log"
-IP_COUNT_FILE = "/var/www/api-prod/scripts/ip_visit_counts.json"
-IP_TIMESTAMP_FILE = "/var/www/api-prod/scripts/ip_timestamps.json"
-IP_COUNTRY_FILE = "/var/www/api-prod/scripts/ip_country.json"
+BASE_DIR = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = BASE_DIR / "scripts"
+IP_COUNT_FILE = os.getenv("IP_COUNT_FILE", str(SCRIPT_DIR / "ip_visit_counts.json"))
+IP_TIMESTAMP_FILE = os.getenv("IP_TIMESTAMP_FILE", str(SCRIPT_DIR / "ip_timestamps.json"))
+IP_COUNTRY_FILE = os.getenv("IP_COUNTRY_FILE", str(SCRIPT_DIR / "ip_country.json"))
 
 def load_json(path):
     if os.path.exists(path):
@@ -39,8 +51,13 @@ def get_country(ip):
 async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
     try:
         # Firebase & Postgres users
-        firebase_users = auth.list_users().iterate_all()
-        firebase_emails = sorted([u.email for u in firebase_users if u.email])
+        firebase_emails = []
+        if fb_auth:
+            try:
+                firebase_users = fb_auth.list_users().iterate_all()
+                firebase_emails = sorted([u.email for u in firebase_users if u.email])
+            except Exception:
+                firebase_emails = []
 
         result = await db.execute(select(User.email))
         postgres_emails = sorted([r[0] for r in result.fetchall() if r[0]])
@@ -116,6 +133,7 @@ async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
             "traffic_log": "\n".join(recent_entries[-20:]),
             "summary": {
                 "real_24h": len(real_24h_ips),
+                "repeat": repeat_visitors,
                 "repeat_visitors": repeat_visitors,
                 "bot": len(ip_categories["bot"]),
                 "suspicious": len(ip_categories["suspicious"]),
