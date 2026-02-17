@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+watchdog
+python-dotenv
+construct==2.8.16
+mgz==1.8.27
+asyncpg
+SQLAlchemy[asyncio]
+aiofiles
+alembic
+psycopg[binary]
+# Optional: retained while legacy Firebase token paths still exist.
+firebase-admin>=6.0.0

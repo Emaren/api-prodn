@@ -1,5 +1,33 @@
+# Environment / local tooling
 .envrc
 .direnv/
 .python-version
-venv-freeze.log
+.env
+.env.*
+!.env.production
+venv/
+.venv/
 venv-logs/
+venv-freeze*.log
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node artifacts (accidentally committed in old snapshots)
+node_modules/
+
+# OS/editor artifacts
+.DS_Store
+._*
+.___*
+
+# Runtime logs and local traces
+*.log
+*.trace
+trace.index
+agent/logs/
+
+# Firebase local secret
+serviceAccountKey.json
