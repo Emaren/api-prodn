@@ -2,27 +2,20 @@
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 import logging
 import os
 
 from db.db import init_db_async, get_db
 from db.models import GameStats
-from firebase_utils import initialize_firebase
 
-# ✅ Routes
+# ✅ Routes (Firebase-free)
 from routes import (
-    user_me,
-    user_routes_async,
-    user_register,
     replay_routes_async,
     debug_routes_async,
     admin_routes_async,
     bets,
-    user_ping,
     chain_id,
-    traffic_route,
 )
 
 print(f"DATABASE_URL: {os.getenv('DATABASE_URL')}")
@@ -30,11 +23,21 @@ print(f"DATABASE_URL: {os.getenv('DATABASE_URL')}")
 class LogRequestMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         print(f"📩 Incoming Request: {request.method} {request.url}")
+
+        # Prefer the new headers you’re actually using now
+        if "x-api-key" in request.headers:
+            print(f"🔑 x-api-key present (len={len(request.headers['x-api-key'])})")
+        else:
+            print("⚠️ No x-api-key header present.")
+
+        if "x-user-uid" in request.headers:
+            print(f"👤 x-user-uid: {request.headers['x-user-uid']}")
+
+        # Keep Authorization preview if you still sometimes send it
         if "authorization" in request.headers:
             token_preview = request.headers["authorization"][:40]
-            print(f"🔑 Auth Header (first 40 chars): {token_preview}...")
-        else:
-            print("⚠️ No Authorization header present.")
+            print(f"🔒 Authorization (first 40 chars): {token_preview}...")
+
         return await call_next(request)
 
 app = FastAPI()
@@ -50,7 +53,7 @@ app.add_middleware(
         "https://aoe2hd-frontend.onrender.com",
         "https://aoe2hdbets.com",
         "https://www.aoe2hdbets.com",
-	"https://app-staging.aoe2hdbets.com",
+        "https://app-staging.aoe2hdbets.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -59,24 +62,25 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    initialize_firebase()
     await init_db_async()
     for route in app.routes:
         print(f"✅ {route.path}")
 
-app.include_router(user_routes_async.router)
-app.include_router(user_register.router)
+# ✅ Register routers (NO Firebase routers)
 app.include_router(replay_routes_async.router)
 app.include_router(debug_routes_async.router)
 app.include_router(admin_routes_async.router)
 app.include_router(bets.router)
-app.include_router(user_ping.router)
 app.include_router(chain_id.router)
-app.include_router(traffic_route.router)
 
 @app.get("/")
 def root():
     return {"message": "AoE2 Betting Backend api-prodn is running!"}
+
+# ✅ Add /health alias (so monitors that expect /health don't 404)
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 @app.get("/api/game_stats")
 async def get_game_stats(db_gen=Depends(get_db)):
@@ -88,12 +92,15 @@ async def get_game_stats(db_gen=Depends(get_db)):
                 .order_by(GameStats.timestamp.desc())
             )
             games = result.scalars().all()
+
             unique_games = {}
             for game in games:
                 if game.replay_hash not in unique_games:
                     unique_games[game.replay_hash] = game
 
-            logging.getLogger(__name__).info(f"📊 Returning {len(unique_games)} unique games from DB")
+            logging.getLogger(__name__).info(
+                f"📊 Returning {len(unique_games)} unique games from DB"
+            )
             return [g.to_dict() for g in unique_games.values()]
     except Exception as e:
         logging.error(f"❌ Failed to fetch game stats: {e}", exc_info=True)
