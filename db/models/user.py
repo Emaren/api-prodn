@@ -10,14 +10,14 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     uid = Column(String(100), unique=True, nullable=False)
     email = Column(String(100), unique=True, index=True)
-    in_game_name = Column(String, nullable=True, unique=True)
-    verified = Column(Boolean, default=False)
+    in_game_name = Column(String(255), nullable=True, unique=True)
+    verified = Column(Boolean, default=False, nullable=False)
     wallet_address = Column(String(100), nullable=True)
-    lock_name = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    lock_name = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     token = Column(String(128), nullable=True)
     last_seen = Column(DateTime, default=None)
-    is_admin = Column(Boolean, default=False)  # ✅ required for admin access
+    is_admin = Column(Boolean, default=False, nullable=False)  # ✅ required for admin access
 
     def __repr__(self):
         return f"<User {self.uid}>"

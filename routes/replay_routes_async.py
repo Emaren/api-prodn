@@ -4,7 +4,6 @@ from sqlalchemy import select
 from db.db import get_db
 from db.models import GameStats
 from datetime import datetime
-import json
 import logging
 import os
 from typing import Optional
@@ -101,12 +100,12 @@ async def parse_new_replay(
             replay_file=data.replay_file,
             replay_hash=data.replay_hash,
             game_version=data.game_version,
-            map=json.dumps(map_payload),
+            map=map_payload,
             game_type=data.game_type,
             duration=duration,
             game_duration=duration,
             winner=data.winner,
-            players=json.dumps(data.players),
+            players=data.players,
             parse_iteration=data.parse_iteration,
             is_final=data.is_final,
             parse_source=data.parse_source or "json_parse",
@@ -186,12 +185,12 @@ async def upload_replay_file(
                 replay_file=original_name,
                 replay_hash=replay_hash,
                 game_version=parsed.get("game_version"),
-                map=json.dumps(map_payload),
+                map=map_payload,
                 game_type=parsed.get("game_type"),
                 duration=duration,
                 game_duration=duration,
                 winner=winner,
-                players=json.dumps(players),
+                players=players,
                 parse_iteration=1,
                 is_final=True,
                 parse_source="file_upload",

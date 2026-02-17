@@ -6,7 +6,7 @@ from sqlalchemy import (
     Column, String, Boolean, Integer, DateTime,
     UniqueConstraint, Index, ForeignKey
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from .base import Base
 
 def is_render():
@@ -16,26 +16,26 @@ class GameStats(Base):
     __tablename__ = "game_stats"
 
     id = Column(Integer, primary_key=True)
-    user_uid = Column(String, ForeignKey("users.uid"), nullable=True, index=True)
+    user_uid = Column(String(100), ForeignKey("users.uid"), nullable=True, index=True)
     replay_file = Column(String(500), nullable=False)
     replay_hash = Column(String(64), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     game_version = Column(String(50))
-    map = Column(String(100))
+    map = Column(JSONB)
     game_type = Column(String(50))
     duration = Column(Integer)
     game_duration = Column(Integer)
     winner = Column(String(100))
-    players = Column(JSON)
-    event_types = Column(JSON)
-    key_events = Column(JSON)
+    players = Column(JSONB)
+    event_types = Column(JSONB)
+    key_events = Column(JSONB)
     timestamp = Column(DateTime, default=datetime.utcnow)
     played_on = Column(DateTime, nullable=True)
-    parse_iteration = Column(Integer, default=0)
-    is_final = Column(Boolean, default=False)
-    disconnect_detected = Column(Boolean, default=False)
-    parse_source = Column(String(20), default="unknown")
-    parse_reason = Column(String(50), default="unspecified")
+    parse_iteration = Column(Integer, default=0, nullable=False)
+    is_final = Column(Boolean, default=False, nullable=False)
+    disconnect_detected = Column(Boolean, default=False, nullable=False)
+    parse_source = Column(String(20), default="unknown", nullable=False)
+    parse_reason = Column(String(50), default="unspecified", nullable=False)
     original_filename = Column(String(255), nullable=True)
 
     __table_args__ = (
@@ -55,14 +55,40 @@ class GameStats(Base):
             map_data = json.loads(self.map) if isinstance(self.map, str) else self.map
         except Exception:
             map_data = {"name": "Unknown", "size": "Unknown"}
+        if not isinstance(map_data, dict):
+            map_data = {"name": "Unknown", "size": "Unknown"}
 
         try:
             players = json.loads(self.players) if isinstance(self.players, str) else self.players
         except Exception:
             players = []
+        if not isinstance(players, list):
+            players = []
 
-        resigns = len([e for e in (self.event_types or []) if e == "resign"])
-        anomalies = any(k for k in (self.key_events or {}) if "anomaly" in k.lower())
+        try:
+            event_types = (
+                json.loads(self.event_types)
+                if isinstance(self.event_types, str)
+                else (self.event_types or [])
+            )
+        except Exception:
+            event_types = []
+        if not isinstance(event_types, list):
+            event_types = []
+
+        try:
+            key_events = (
+                json.loads(self.key_events)
+                if isinstance(self.key_events, str)
+                else (self.key_events or {})
+            )
+        except Exception:
+            key_events = {}
+        if not isinstance(key_events, dict):
+            key_events = {}
+
+        resigns = len([e for e in event_types if e == "resign"])
+        anomalies = any(k for k in key_events if "anomaly" in str(k).lower())
 
         trace_block = (
             "\n📊 Final Game Parsed\n"
@@ -104,8 +130,8 @@ class GameStats(Base):
             "game_duration": self.game_duration,
             "winner": self.winner,
             "players": players,
-            "event_types": self.event_types,
-            "key_events": self.key_events,
+            "event_types": event_types,
+            "key_events": key_events,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "played_on": self.played_on.isoformat() if self.played_on else None,
             "parse_iteration": self.parse_iteration,

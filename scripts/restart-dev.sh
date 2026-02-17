@@ -11,6 +11,6 @@ tmux respawn-pane -t $SESSION:0.0 -k \
 
 # Restart backend (pane 1) and keep pane alive
 tmux respawn-pane -t $SESSION:0.1 -k \
-  "clear && cd '$API_DIR' && ENV=development exec uvicorn app:app --reload --host 0.0.0.0 --port 8002"
+  "clear && cd '$API_DIR' && ENV=development AUTO_CREATE_TABLES=true exec uvicorn app:app --reload --host 0.0.0.0 --port 8002"
 
 tmux display-message "Dev session restarted"

@@ -12,7 +12,7 @@ if [ $? != 0 ]; then
   tmux new-session -d -s $SESSION_NAME
 
   # Backend pane
-  tmux send-keys -t $SESSION_NAME "cd '$API_DIR' && pkill -f 'uvicorn.*8002' || true && ENV=development uvicorn app:app --reload --host 0.0.0.0 --port 8002" C-m
+  tmux send-keys -t $SESSION_NAME "cd '$API_DIR' && pkill -f 'uvicorn.*8002' || true && ENV=development AUTO_CREATE_TABLES=true uvicorn app:app --reload --host 0.0.0.0 --port 8002" C-m
 
   # Frontend pane
   tmux split-window -h -t $SESSION_NAME

@@ -12,7 +12,7 @@ tmux kill-session -t $SESSION 2>/dev/null
 tmux new-session -d -s $SESSION -n dev "cd '$APP_DIR' && npm run dev"
 
 # Split horizontally: backend on the right
-tmux split-window -h -t $SESSION:0 "cd '$API_DIR' && ENV=development uvicorn app:app --reload --host 0.0.0.0 --port 8002"
+tmux split-window -h -t $SESSION:0 "cd '$API_DIR' && ENV=development AUTO_CREATE_TABLES=true uvicorn app:app --reload --host 0.0.0.0 --port 8002"
 
 # Rename panes
 tmux select-pane -t $SESSION:0.0 -T "Frontend"

@@ -25,6 +25,7 @@ Production FastAPI backend for AoE2HDBets.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+alembic upgrade head
 uvicorn app:app --reload --host 0.0.0.0 --port 8002
 ```
 
@@ -41,6 +42,15 @@ Optional/common:
 - `MAX_REPLAY_UPLOAD_BYTES`
 - `CHAIN_ID`
 - `ALLOWED_ORIGINS`
+- `AUTO_CREATE_TABLES=true` (local-only convenience; default is disabled to avoid schema drift)
+
+## Migrations
+
+Apply before restarting backend on VPS/prod:
+
+```bash
+alembic upgrade head
+```
 
 ## Helper scripts
 
