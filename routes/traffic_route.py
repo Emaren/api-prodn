@@ -74,7 +74,10 @@ async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
         day_ago = now - timedelta(hours=24)
 
         if os.path.exists(LOG_PATH):
-            lines = subprocess.check_output(["tail", "-n", "1000", LOG_PATH]).decode().splitlines()
+            try:
+                lines = subprocess.check_output(["tail", "-n", "1000", LOG_PATH]).decode().splitlines()
+            except Exception:
+                lines = []
 
             for line in lines:
                 ip_match = re.match(r"(\d+\.\d+\.\d+\.\d+)", line)
