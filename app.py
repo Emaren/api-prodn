@@ -3,12 +3,12 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.future import select
+from importlib import import_module
 import logging
 import os
 
 from db.db import init_db_async, get_db
 from db.models import GameStats
-from firebase_utils import initialize_firebase
 
 # Core routes are always enabled.
 from routes import (
@@ -67,6 +67,7 @@ async def startup_event():
 
     # Firebase-backed routes are optional: enable only when credentials are usable.
     try:
+        initialize_firebase = import_module("firebase_utils").initialize_firebase
         initialize_firebase()
         from routes import user_routes_async, user_register, user_ping, traffic_route
 
