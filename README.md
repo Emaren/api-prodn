@@ -46,6 +46,7 @@ Optional/common:
 - `MAX_REPLAY_UPLOAD_BYTES`
 - `CHAIN_ID`
 - `ALLOWED_ORIGINS`
+- `TRAFFIC_STATE_DIR` (default: `runtime/` in repo root)
 - `AUTO_CREATE_TABLES=true` (local-only convenience; default is disabled to avoid schema drift)
 
 ## Migrations

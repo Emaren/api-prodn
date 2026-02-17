@@ -29,6 +29,10 @@ node_modules/
 trace.index
 agent/logs/
 scripts/ip_timestamps.json
+scripts/ip_country.json
+scripts/ip_visit_counts.json
+scripts/seen_log_line_hashes.json
+runtime/
 
 # Legacy local secret
 serviceAccountKey.json

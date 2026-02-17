@@ -19,22 +19,36 @@ router = APIRouter()
 
 LOG_PATH = "/var/log/nginx/access.log"
 BASE_DIR = Path(__file__).resolve().parent.parent
-SCRIPT_DIR = BASE_DIR / "scripts"
-IP_COUNT_FILE = os.getenv("IP_COUNT_FILE", str(SCRIPT_DIR / "ip_visit_counts.json"))
-IP_TIMESTAMP_FILE = os.getenv("IP_TIMESTAMP_FILE", str(SCRIPT_DIR / "ip_timestamps.json"))
-IP_COUNTRY_FILE = os.getenv("IP_COUNTRY_FILE", str(SCRIPT_DIR / "ip_country.json"))
-SEEN_LINE_HASHES_FILE = os.getenv("SEEN_LINE_HASHES_FILE", str(SCRIPT_DIR / "seen_log_line_hashes.json"))
+SCRIPT_DIR = BASE_DIR / "scripts"  # legacy location
+STATE_DIR = Path(os.getenv("TRAFFIC_STATE_DIR", str(BASE_DIR / "runtime")))
 
-def load_json(path):
+IP_COUNT_FILE = os.getenv("IP_COUNT_FILE", str(STATE_DIR / "ip_visit_counts.json"))
+IP_TIMESTAMP_FILE = os.getenv("IP_TIMESTAMP_FILE", str(STATE_DIR / "ip_timestamps.json"))
+IP_COUNTRY_FILE = os.getenv("IP_COUNTRY_FILE", str(STATE_DIR / "ip_country.json"))
+SEEN_LINE_HASHES_FILE = os.getenv("SEEN_LINE_HASHES_FILE", str(STATE_DIR / "seen_log_line_hashes.json"))
+
+LEGACY_IP_COUNT_FILE = str(SCRIPT_DIR / "ip_visit_counts.json")
+LEGACY_IP_TIMESTAMP_FILE = str(SCRIPT_DIR / "ip_timestamps.json")
+LEGACY_IP_COUNTRY_FILE = str(SCRIPT_DIR / "ip_country.json")
+LEGACY_SEEN_LINE_HASHES_FILE = str(SCRIPT_DIR / "seen_log_line_hashes.json")
+
+def load_json(path, fallback_path=None):
     if os.path.exists(path):
         try:
             with open(path) as f:
                 return json.load(f)
         except:
             pass
+    if fallback_path and os.path.exists(fallback_path):
+        try:
+            with open(fallback_path) as f:
+                return json.load(f)
+        except:
+            pass
     return {}
 
 def save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f)
 
@@ -62,10 +76,10 @@ async def get_traffic_stats(
         profile_gap_uids = sorted(set(missing_email_uids) | set(missing_name_uids))
 
         # Load persistent visit data
-        ip_counts = load_json(IP_COUNT_FILE)
-        ip_timestamps = load_json(IP_TIMESTAMP_FILE)
-        ip_countries = load_json(IP_COUNTRY_FILE)
-        seen_hashes = load_json(SEEN_LINE_HASHES_FILE)
+        ip_counts = load_json(IP_COUNT_FILE, LEGACY_IP_COUNT_FILE)
+        ip_timestamps = load_json(IP_TIMESTAMP_FILE, LEGACY_IP_TIMESTAMP_FILE)
+        ip_countries = load_json(IP_COUNTRY_FILE, LEGACY_IP_COUNTRY_FILE)
+        seen_hashes = load_json(SEEN_LINE_HASHES_FILE, LEGACY_SEEN_LINE_HASHES_FILE)
         if not isinstance(seen_hashes, list):
             seen_hashes = []
         seen_set = set(seen_hashes)
