@@ -30,5 +30,5 @@ trace.index
 agent/logs/
 scripts/ip_timestamps.json
 
-# Firebase local secret
+# Legacy local secret
 serviceAccountKey.json

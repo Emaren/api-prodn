@@ -13,11 +13,6 @@ from sqlalchemy import select
 from db.db import get_db
 from db.models import User
 
-try:
-    from firebase_admin import auth as fb_auth
-except Exception:
-    fb_auth = None
-
 router = APIRouter()
 
 LOG_PATH = "/var/log/nginx/access.log"
@@ -50,18 +45,13 @@ def get_country(ip):
 @router.get("/api/traffic")
 async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
     try:
-        # Firebase & Postgres users
-        firebase_emails = []
-        if fb_auth:
-            try:
-                firebase_users = fb_auth.list_users().iterate_all()
-                firebase_emails = sorted([u.email for u in firebase_users if u.email])
-            except Exception:
-                firebase_emails = []
-
-        result = await db.execute(select(User.email))
-        postgres_emails = sorted([r[0] for r in result.fetchall() if r[0]])
-        only_in_firebase = list(set(firebase_emails) - set(postgres_emails))
+        # User totals and profile quality checks from Postgres only.
+        result = await db.execute(select(User.uid, User.email, User.in_game_name))
+        users = result.fetchall()
+        postgres_total = len(users)
+        missing_email_uids = sorted([uid for uid, email, _ in users if uid and not email])
+        missing_name_uids = sorted([uid for uid, _, in_game_name in users if uid and not in_game_name])
+        profile_gap_uids = sorted(set(missing_email_uids) | set(missing_name_uids))
 
         # Load persistent visit data
         ip_counts = load_json(IP_COUNT_FILE)
@@ -129,10 +119,11 @@ async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
         save_json(IP_COUNTRY_FILE, ip_countries)
 
         return {
-            "firebase_total": len(firebase_emails),
-            "postgres_total": len(postgres_emails),
-            "mismatch_count": len(only_in_firebase),
-            "only_in_firebase": only_in_firebase,
+            "postgres_total": postgres_total,
+            "profile_gap_count": len(profile_gap_uids),
+            "profile_gap_uids": profile_gap_uids,
+            "missing_email_count": len(missing_email_uids),
+            "missing_name_count": len(missing_name_uids),
             "traffic_log": "\n".join(recent_entries[-20:]),
             "summary": {
                 "real_24h": len(real_24h_ips),

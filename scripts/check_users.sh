@@ -1,33 +1,24 @@
-#!/bin/bash
-cd /var/www/aoe2hdbets-api/aoe2hd-parsing || exit 1
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Export Firebase users to JSON
-firebase auth:export users.json --format=json > /dev/null
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_DIR"
 
-echo "🧮 User Count Summary"
-echo "----------------------"
+DB_HOST="${DB_HOST:-localhost}"
+DB_USER="${DB_USER:-aoe2user}"
+DB_NAME="${DB_NAME:-aoe2db}"
 
-# Firebase user count and emails
-firebase_count=$(jq '.users | length' users.json)
-echo "📥 Firebase users:  $firebase_count"
+echo "🧮 Postgres User Summary"
+echo "------------------------"
 
-if [ "$firebase_count" -gt 0 ]; then
-  echo "📧 Firebase emails:"
-  jq -r '.users[].email' users.json | sed 's/^/   - /'
-else
-  echo "   No Firebase users found."
-fi
-
-echo ""
-
-# Postgres user count and details
-postgres_count=$(psql -h localhost -U aoe2user -d aoe2db -tAc "SELECT COUNT(*) FROM users;")
+postgres_count=$(psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM users;")
 echo "📊 Postgres users: $postgres_count"
 
 if [ "$postgres_count" -gt 0 ]; then
-  echo "👤 Postgres user details:"
-  psql -h localhost -U aoe2user -d aoe2db -P pager=off -c \
-    "SELECT email, in_game_name, CASE WHEN is_admin THEN '✅ admin' ELSE '❌' END AS role FROM users;" \
+  echo "👤 User details:"
+  psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -P pager=off -c \
+    "SELECT uid, email, in_game_name, CASE WHEN is_admin THEN 'admin' ELSE 'user' END AS role FROM users ORDER BY created_at DESC LIMIT 100;" \
     | sed '1d;$d' | sed 's/^/   - /'
 else
   echo "   No Postgres users found."

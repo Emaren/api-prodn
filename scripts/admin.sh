@@ -1,24 +1,21 @@
 #!/bin/bash
 
-# Location: /var/www/api-prod/scripts/admin.sh
-
 set -e
 
 SCRIPTS_DIR="$(dirname "$0")"
 
 print_menu() {
   echo "=============================="
-  echo "  Wolo Firebase/DB Admin"
+  echo "  Wolo Postgres Admin"
   echo "=============================="
   echo "1) Check All Users"
   echo "2) Check Users"
-  echo "3) List Firebase Users"
-  echo "4) Sync Data"
-  echo "5) Sync Schema"
-  echo "6) Migrate DB"
-  echo "7) Reset DB for Launch"
-  echo "8) Wipe for Launch"
-  echo "9) Wipe Users and Game Stats"
+  echo "3) Sync Data"
+  echo "4) Sync Schema"
+  echo "5) Migrate DB"
+  echo "6) Reset DB for Launch"
+  echo "7) Wipe for Launch"
+  echo "8) Wipe Users and Game Stats"
   echo "0) Exit"
   echo "------------------------------"
 }
@@ -35,24 +32,21 @@ while true; do
       bash "$SCRIPTS_DIR/check_users.sh"
       ;;
     3)
-      python3 "$SCRIPTS_DIR/list_firebase_users.py"
-      ;;
-    4)
       bash "$SCRIPTS_DIR/sync_data.sh"
       ;;
-    5)
+    4)
       bash "$SCRIPTS_DIR/sync_schema.sh"
       ;;
-    6)
+    5)
       bash "$SCRIPTS_DIR/migrate.sh"
       ;;
-    7)
+    6)
       bash "$SCRIPTS_DIR/reset_db_for_launch.sh"
       ;;
-    8)
+    7)
       bash "$SCRIPTS_DIR/wipe_for_launch.sh"
       ;;
-    9)
+    8)
       bash "$SCRIPTS_DIR/wipe_users_and_game_stats.sh"
       ;;
     0)

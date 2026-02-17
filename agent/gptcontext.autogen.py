@@ -48,8 +48,8 @@ def detect_parser_mode():
         return "fast"
     return "unknown"
 
-def detect_firebase_integration():
-    path = PROJECT_DIR / "firebase_utils.py"
+def detect_identity_integration():
+    path = PROJECT_DIR / "routes/user_routes_async.py"
     return path.exists()
 
 def detect_replay_parser_function():
@@ -80,7 +80,7 @@ def build_context():
         "git_branch": get_git_branch(),
         "python_version": get_python_version(),
         "parser_mode": detect_parser_mode(),
-        "firebase_integration": detect_firebase_integration(),
+        "identity_integration": detect_identity_integration(),
         "replay_parser_module": detect_replay_parser_function(),
         "api_targets": detect_api_targets(),
         "uses_async_sql": detect_async_sql(),

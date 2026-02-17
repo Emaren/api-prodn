@@ -3,7 +3,6 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.future import select
-from importlib import import_module
 import logging
 import os
 
@@ -70,16 +69,6 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     await init_db_async()
-
-    # Best-effort Firebase init for environments that still have it.
-    try:
-        initialize_firebase = import_module("firebase_utils").initialize_firebase
-        initialize_firebase()
-        logging.getLogger(__name__).info("✅ Firebase initialized")
-    except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "⚠️ Firebase init skipped/unavailable: %s", exc
-        )
 
     for route in app.routes:
         print(f"✅ {route.path}")

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import base64
 import json
-import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Depends, Body, status, Request
@@ -13,43 +13,10 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
-try:
-    import firebase_admin
-    from firebase_admin import auth as fb_auth, credentials as fb_credentials
-except Exception:
-    firebase_admin = None
-    fb_auth = None
-    fb_credentials = None
-
 from db.db import get_db
 from db.models import User, GameStats
 
 router = APIRouter(prefix="/api/user", tags=["user"])
-
-def _initialize_firebase_if_possible() -> bool:
-    """Best-effort Firebase init. Safe no-op when package/creds are absent."""
-    if not firebase_admin or not fb_auth or not fb_credentials:
-        return False
-    if firebase_admin._apps:
-        return True
-
-    cert_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "serviceAccountKey.json")
-    raw_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-
-    try:
-        if raw_json:
-            cred = fb_credentials.Certificate(json.loads(raw_json))
-        else:
-            if not os.path.exists(cert_path):
-                return False
-            cred = fb_credentials.Certificate(cert_path)
-        firebase_admin.initialize_app(cred)
-        return True
-    except Exception:
-        return False
-
-
-FIREBASE_ENABLED = _initialize_firebase_if_possible()
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -66,13 +33,40 @@ def _token_from_request(
     return None
 
 
-def _decode_firebase_token(token: str | None) -> dict[str, Any] | None:
-    if not token or not FIREBASE_ENABLED or not fb_auth:
+def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
         return None
+
     try:
-        return fb_auth.verify_id_token(token)
+        payload_segment = parts[1]
+        payload_segment += "=" * (-len(payload_segment) % 4)
+        decoded_bytes = base64.urlsafe_b64decode(payload_segment)
+        payload = json.loads(decoded_bytes.decode("utf-8"))
+        if isinstance(payload, dict):
+            return payload
+        return None
     except Exception:
         return None
+
+
+def _identity_from_bearer_token(token: str | None) -> dict[str, str | None] | None:
+    if not token:
+        return None
+
+    # JWT compatibility path: extract claims without provider-specific verification.
+    payload = _decode_jwt_payload(token)
+    if payload:
+        uid = payload.get("uid") or payload.get("sub")
+        email = payload.get("email")
+        if uid:
+            return {"uid": str(uid), "email": str(email) if email else None}
+
+    # Raw-token compatibility path: treat Bearer token as UID directly.
+    if token.count(".") == 0:
+        return {"uid": token, "email": None}
+
+    return None
 
 
 def resolve_request_identity(
@@ -83,13 +77,13 @@ def resolve_request_identity(
 ) -> dict[str, str | None] | None:
     """
     Resolve identity from (in order):
-    1) Firebase Bearer token (if Firebase is available)
+    1) Bearer token (JWT claim extraction or raw UID token)
     2) x-user-uid/x-user-email headers
     3) explicit fallback values (typically request body)
     """
-    decoded = _decode_firebase_token(_token_from_request(request, credentials))
-    if decoded and decoded.get("uid"):
-        return {"uid": decoded["uid"], "email": decoded.get("email")}
+    token_identity = _identity_from_bearer_token(_token_from_request(request, credentials))
+    if token_identity and token_identity.get("uid"):
+        return token_identity
 
     uid = request.headers.get("x-user-uid") or fallback_uid
     email = request.headers.get("x-user-email") or fallback_email
@@ -98,7 +92,7 @@ def resolve_request_identity(
     return None
 
 
-async def verify_firebase_token(
+async def verify_request_identity(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> dict:
@@ -106,13 +100,13 @@ async def verify_firebase_token(
     if not identity:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing identity. Provide Firebase Bearer token or x-user-uid.",
+            detail="Missing identity. Provide Bearer token, x-user-uid, or body.uid.",
         )
     return identity
 
-# Get current user from Firebase token
-async def get_current_user(decoded_token: dict = Depends(verify_firebase_token), db: AsyncSession = Depends(get_db)) -> User:
-    uid = decoded_token["uid"]
+# Get current user from resolved request identity
+async def get_current_user(decoded_identity: dict = Depends(verify_request_identity), db: AsyncSession = Depends(get_db)) -> User:
+    uid = decoded_identity["uid"]
     user = await db.scalar(select(User).where(User.uid == uid))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")

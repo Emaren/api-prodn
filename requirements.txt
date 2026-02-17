@@ -9,5 +9,3 @@ SQLAlchemy[asyncio]
 aiofiles
 alembic
 psycopg[binary]
-# Optional: retained while legacy Firebase token paths still exist.
-firebase-admin>=6.0.0
