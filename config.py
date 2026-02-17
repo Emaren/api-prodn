@@ -5,8 +5,28 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 env_loaded = False
 
-# Get ENV early
-ENV = os.getenv("ENV", os.getenv("RENDER", False) and "production" or "development")
+def _resolve_env(default: str = "development") -> str:
+    current = os.getenv("ENV")
+    if current:
+        return current
+    render_flag = str(os.getenv("RENDER", "")).strip().lower()
+    if render_flag and render_flag not in {"0", "false", "no"}:
+        return "production"
+    return default
+
+# ✅ 0. Prefer explicit dotenv path when provided by process manager.
+dotenv_override = os.getenv("DOTENV_CONFIG_PATH")
+if dotenv_override:
+    dotenv_path = os.path.abspath(os.path.expanduser(dotenv_override))
+    if os.path.exists(dotenv_path):
+        load_dotenv(dotenv_path=dotenv_path)
+        env_loaded = True
+        print(f"✅ Loaded dotenv from DOTENV_CONFIG_PATH: {dotenv_path}")
+    else:
+        print(f"⚠️ DOTENV_CONFIG_PATH not found: {dotenv_path}")
+
+# Get ENV after optional override load
+ENV = _resolve_env()
 
 # ✅ 1. Prefer .env.override only in development
 override_path = os.path.join(BASE_DIR, ".env.override")
@@ -30,6 +50,9 @@ if not env_loaded:
         print(f"✅ Loaded environment: {ENV} from {env_file}")
     else:
         print(f"⚠️ No env file found for {ENV}. Proceeding with defaults.")
+
+# Re-resolve ENV in case file load changed it.
+ENV = _resolve_env(default=ENV)
 
 # ✅ 3. Load .env.local last, but only in dev mode
 local_path = os.path.join(BASE_DIR, ".env.local")

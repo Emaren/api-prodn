@@ -9,6 +9,7 @@ module.exports = {
       env: {
         // keep the shared ones…
         NODE_ENV: 'production',
+        ENV: 'production',
         // …but point to the prod-nightly env file
         DOTENV_CONFIG_PATH: '/var/www/api-prodn/.env.production',
       },
