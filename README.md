@@ -19,6 +19,9 @@ Production FastAPI backend for AoE2HDBets.
 - `POST /api/parse_replay`:
   - JSON replay ingestion path (compatible with helper scripts)
   - Supports `x-api-key` when `INTERNAL_API_KEY` is configured
+- `GET /api/traffic`:
+  - Traffic diagnostics data
+  - Requires admin bearer token (`ADMIN_TOKEN`)
 
 ## Local development
 

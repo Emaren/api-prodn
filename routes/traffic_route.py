@@ -7,12 +7,13 @@ from collections import defaultdict, Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from db.db import get_db
 from db.models import User
+from routes.admin_routes_async import verify_admin_token
 
 router = APIRouter()
 
@@ -45,7 +46,12 @@ def get_country(ip):
         return "??"
 
 @router.get("/api/traffic")
-async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
+async def get_traffic_stats(
+    authorization: str = Header(default=None),
+    x_admin_token: str = Header(default=None, alias="X-Admin-Token"),
+    db: AsyncSession = Depends(get_db),
+):
+    verify_admin_token(authorization, x_admin_token)
     try:
         # User totals and profile quality checks from Postgres only.
         result = await db.execute(select(User.uid, User.email, User.in_game_name))
