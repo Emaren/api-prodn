@@ -123,6 +123,7 @@ async def parse_new_replay(
 async def upload_replay_file(
     file: UploadFile = File(...),
     db_gen=Depends(get_db),
+    _: bool = Depends(require_internal_key),
     user_uid: str = Header(default="system", alias="x-user-uid"),
 ):
     original_name = file.filename or "replay.aoe2record"

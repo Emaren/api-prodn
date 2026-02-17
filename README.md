@@ -15,6 +15,7 @@ Production FastAPI backend for AoE2HDBets.
   - Accepts multipart replay file upload
   - Parses server-side
   - Stores final replay row in `game_stats`
+  - Supports `x-api-key` when `INTERNAL_API_KEY` is configured
 - `POST /api/parse_replay`:
   - JSON replay ingestion path (compatible with helper scripts)
   - Supports `x-api-key` when `INTERNAL_API_KEY` is configured
