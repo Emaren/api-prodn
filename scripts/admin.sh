@@ -16,6 +16,7 @@ print_menu() {
   echo "6) Reset DB for Launch"
   echo "7) Wipe for Launch"
   echo "8) Wipe Users and Game Stats"
+  echo "9) Set Admin Flag (Promote/Demote)"
   echo "0) Exit"
   echo "------------------------------"
 }
@@ -48,6 +49,36 @@ while true; do
       ;;
     8)
       bash "$SCRIPTS_DIR/wipe_users_and_game_stats.sh"
+      ;;
+    9)
+      read -p "Promote or demote? (promote/demote): " action
+      read -p "Target by uid/email/name/latest: " mode
+      cmd=(python3 "$SCRIPTS_DIR/set_admin.py")
+      if [[ "$action" == "demote" ]]; then
+        cmd+=(--unset)
+      fi
+      case "$mode" in
+        uid)
+          read -p "UID: " value
+          cmd+=(--uid "$value")
+          ;;
+        email)
+          read -p "Email: " value
+          cmd+=(--email "$value")
+          ;;
+        name)
+          read -p "In-game name: " value
+          cmd+=(--name "$value")
+          ;;
+        latest)
+          cmd+=(--latest)
+          ;;
+        *)
+          echo "Invalid target mode."
+          continue
+          ;;
+      esac
+      "${cmd[@]}"
       ;;
     0)
       echo "Goodbye."

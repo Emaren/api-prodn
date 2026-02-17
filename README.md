@@ -64,3 +64,21 @@ alembic upgrade head
 ## Deployment model
 
 - Local MBP -> push `main` -> VPS pull `main` -> restart service.
+
+## Admin bootstrap
+
+Use the helper to inspect/promote admin users:
+
+```bash
+python scripts/set_admin.py --list
+python scripts/set_admin.py --email you@example.com
+```
+
+Other selectors:
+
+```bash
+python scripts/set_admin.py --uid <uid>
+python scripts/set_admin.py --name "<in-game-name>"
+python scripts/set_admin.py --latest
+python scripts/set_admin.py --email you@example.com --unset
+```
