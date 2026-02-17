@@ -4,7 +4,6 @@
 .python-version
 .env
 .env.*
-!.env.production
 venv/
 .venv/
 venv-logs/
@@ -54,3 +53,5 @@ xor_out.bin
 freeze-diff.txt
 req-diff.txt
 SELECT
+
+!.env.production.example

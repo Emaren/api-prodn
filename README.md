@@ -35,6 +35,8 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8002
 
 ## Environment
 
+Start from `.env.production.example` and create your local `.env.production`.
+
 Required:
 
 - `DATABASE_URL` (`postgresql+asyncpg://...`)
