@@ -9,3 +9,4 @@ SQLAlchemy[asyncio]
 aiofiles
 alembic
 psycopg[binary]
+python-multipart

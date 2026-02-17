@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # 🧠 Always absolute paths to be safe
-BACKEND_DIR="$HOME/projects/aoe2hd-parsing"
-FRONTEND_DIR="$HOME/projects/aoe2hd-frontend"
+BACKEND_DIR="$HOME/projects/AoE2HDBets/api-prodn"
+FRONTEND_DIR="$HOME/projects/AoE2HDBets/app-prodn"
 
 # 1. Git push frontend
 echo "🧼 Pushing frontend..."
@@ -24,8 +24,8 @@ export ENABLE_REALTIME=true
 export SHOW_DEBUG_UI=false
 export DATABASE_URL="postgresql+asyncpg://aoe2db_user:your-password@your-db-host:5432/aoe2db"
 export ADMIN_TOKEN="your_secure_admin_token"
-export FASTAPI_URL="https://aoe2hd-parser-api.onrender.com/api/parse_replay"
-export API_TARGETS="https://aoe2hd-parser-api.onrender.com/api/parse_replay"
+export FASTAPI_URL="https://aoe2hdbets.com/api/parse_replay"
+export API_TARGETS="https://aoe2hdbets.com/api/parse_replay"
 
 bash scripts/generate_env.sh
 

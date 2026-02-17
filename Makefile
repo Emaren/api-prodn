@@ -98,17 +98,17 @@ prune:
 # ─────────────────────────────
 
 frontend:
-	cd ../aoe2hd-frontend && npm run dev
+	cd ../app-prodn && npm run dev
 
 all:
 	(ENV_FILE=$(ENV_FILE) ./run_local.sh &) && \
-	cd ../aoe2hd-frontend && npm run dev
+	cd ../app-prodn && npm run dev
 
 frontend-tab:
-	osascript -e 'tell app "Terminal" to do script "cd ~/projects/aoe2hd-frontend && npm run dev"'
+	osascript -e 'tell app "Terminal" to do script "cd ~/projects/AoE2HDBets/app-prodn && npm run dev"'
 
 backend-tab:
-	osascript -e 'tell app "Terminal" to do script "cd ~/projects/aoe2hd-parsing && ENV_FILE=$(ENV_FILE) ./run_local.sh"'
+	osascript -e 'tell app "Terminal" to do script "cd ~/projects/AoE2HDBets/api-prodn && ENV_FILE=$(ENV_FILE) ./run_local.sh"'
 
 # ─────────────────────────────
 # 🔖 GIT TAG HELPER

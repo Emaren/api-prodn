@@ -56,7 +56,6 @@ app.add_middleware(
         "http://localhost:3001",
         "http://localhost:3002",
         "https://aoe2-betting.vercel.app",
-        "https://aoe2hd-frontend.onrender.com",
         "https://aoe2hdbets.com",
         "https://www.aoe2hdbets.com",
         "https://app-staging.aoe2hdbets.com",

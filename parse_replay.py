@@ -24,7 +24,8 @@ logging.basicConfig(level=getattr(logging, LOGGING_LEVEL, logging.DEBUG))
 
 ENDPOINTS = {
     "local": "http://localhost:8002/api/parse_replay",
-    "render": "https://aoe2hd-parser-api.onrender.com/api/parse_replay"
+    "render": "https://aoe2hdbets.com/api/parse_replay",
+    "production": "https://aoe2hdbets.com/api/parse_replay",
 }
 
 # ───────────────────────────────────────────────
@@ -66,6 +67,22 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
         try:
             logging.info(f"📤 Sending to [{target}] → {parsed['replay_file']}")
             headers = {}
+            user_uid = (
+                os.environ.get("WATCHER_USER_UID")
+                or os.environ.get("USER_UID")
+                or config.get("watcher_user_uid")
+                or "system"
+            )
+            headers["x-user-uid"] = user_uid
+
+            api_key = (
+                os.environ.get("INTERNAL_API_KEY")
+                or config.get("internal_api_key")
+                or os.environ.get("API_INTERNAL_KEY")
+            )
+            if api_key:
+                headers["x-api-key"] = api_key
+
             token = (
                 os.environ.get("API_AUTH_TOKEN")
                 or config.get("api_auth_token")
@@ -75,10 +92,30 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
             if token:
                 headers["Authorization"] = f"Bearer {token}"
 
-            response = requests.post(full_url, json=parsed, headers=headers)
+            response = requests.post(full_url, json=parsed, headers=headers, timeout=60)
 
             if response.ok:
                 logging.info(f"✅ [{target}] Response: {response.status_code} - {response.text}")
+            elif response.status_code == 401 and is_final and not api_key:
+                fallback_url = full_url.replace("/api/parse_replay", "/api/replay/upload")
+                logging.warning(
+                    f"🔁 [{target}] JSON route unauthorized; retrying final upload as file → {fallback_url}"
+                )
+                with open(replay_path, "rb") as replay_handle:
+                    fallback = requests.post(
+                        fallback_url,
+                        files={"file": (os.path.basename(replay_path), replay_handle)},
+                        headers={"x-user-uid": user_uid},
+                        timeout=90,
+                    )
+                if fallback.ok:
+                    logging.info(
+                        f"✅ [{target}] File-upload fallback succeeded: {fallback.status_code} - {fallback.text}"
+                    )
+                else:
+                    logging.error(
+                        f"❌ [{target}] File-upload fallback failed: {fallback.status_code} - {fallback.text}"
+                    )
             else:
                 logging.error(f"❌ [{target}] Error: {response.status_code} - {response.text}")
         except Exception as exc:

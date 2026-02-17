@@ -34,7 +34,7 @@ services:
 
   backend:
     build:
-      context: .              # ✅ Fixed path (you are already inside aoe2hd-parsing)
+      context: .
       dockerfile: Dockerfile
     container_name: aoe2-backend
     restart: always
@@ -47,11 +47,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
 
   frontend:
     build:
-      context: ../aoe2hd-frontend
+      context: ../app-prodn
       dockerfile: Dockerfile
     container_name: aoe2-frontend
     restart: always

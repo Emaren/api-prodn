@@ -5,7 +5,7 @@ setup(
     name='aoe2-betting-client',
     version='0.1.0',
     description='Parse Age of Empires 2 HD recorded games and integrate with a betting dapp.',
-    url='https://github.com/Emaren/aoe2hd-parsing',
+    url='https://github.com/Emaren/api-prodn',
     license='MIT',
     author='Emaren',
     author_email='your-email@example.com',

@@ -162,8 +162,11 @@ def default_dirs():
         ]]
     elif system == "Darwin":
         paths += [
-            "/Users/tonyblum/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Age2HD/SaveGame",
-            "/Users/tonyblum/Documents/My Games/Age of Empires 2 DE/SaveGame"
+            os.path.join(
+                home,
+                "Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Age2HD/SaveGame",
+            ),
+            os.path.join(home, "Documents/My Games/Age of Empires 2 DE/SaveGame"),
         ]
     else:
         paths += [os.path.join(home, p) for p in [

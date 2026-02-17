@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import hashlib
 import subprocess
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta
@@ -21,6 +22,7 @@ SCRIPT_DIR = BASE_DIR / "scripts"
 IP_COUNT_FILE = os.getenv("IP_COUNT_FILE", str(SCRIPT_DIR / "ip_visit_counts.json"))
 IP_TIMESTAMP_FILE = os.getenv("IP_TIMESTAMP_FILE", str(SCRIPT_DIR / "ip_timestamps.json"))
 IP_COUNTRY_FILE = os.getenv("IP_COUNTRY_FILE", str(SCRIPT_DIR / "ip_country.json"))
+SEEN_LINE_HASHES_FILE = os.getenv("SEEN_LINE_HASHES_FILE", str(SCRIPT_DIR / "seen_log_line_hashes.json"))
 
 def load_json(path):
     if os.path.exists(path):
@@ -57,6 +59,11 @@ async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
         ip_counts = load_json(IP_COUNT_FILE)
         ip_timestamps = load_json(IP_TIMESTAMP_FILE)
         ip_countries = load_json(IP_COUNTRY_FILE)
+        seen_hashes = load_json(SEEN_LINE_HASHES_FILE)
+        if not isinstance(seen_hashes, list):
+            seen_hashes = []
+        seen_set = set(seen_hashes)
+        new_hashes = []
 
         recent_entries = []
         ip_categories = defaultdict(set)
@@ -77,17 +84,22 @@ async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
 
                 ip = ip_match.group(1)
                 ua = ua_match.group(1).lower()
+                line_hash = hashlib.sha1(line.encode("utf-8", errors="ignore")).hexdigest()
 
-                if ip not in ip_counts:
-                    ip_counts[ip] = 0
-                ip_counts[ip] += 1
+                if line_hash not in seen_set:
+                    seen_set.add(line_hash)
+                    new_hashes.append(line_hash)
 
-                if ip not in ip_timestamps:
-                    ip_timestamps[ip] = []
-                ip_timestamps[ip].append(now.isoformat())
+                    if ip not in ip_counts:
+                        ip_counts[ip] = 0
+                    ip_counts[ip] += 1
 
-                if ip not in ip_countries:
-                    ip_countries[ip] = get_country(ip)
+                    if ip not in ip_timestamps:
+                        ip_timestamps[ip] = []
+                    ip_timestamps[ip].append(now.isoformat())
+
+                    if ip not in ip_countries:
+                        ip_countries[ip] = get_country(ip)
 
                 if any(bot in ua for bot in ["bot", "crawl", "spider", "censys", "zgrab"]):
                     ip_categories["bot"].add(ip)
@@ -117,6 +129,9 @@ async def get_traffic_stats(db: AsyncSession = Depends(get_db)):
         save_json(IP_COUNT_FILE, ip_counts)
         save_json(IP_TIMESTAMP_FILE, ip_timestamps)
         save_json(IP_COUNTRY_FILE, ip_countries)
+        # Bound memory/disk growth for seen log lines.
+        trimmed_hashes = (seen_hashes + new_hashes)[-10000:]
+        save_json(SEEN_LINE_HASHES_FILE, trimmed_hashes)
 
         return {
             "postgres_total": postgres_total,

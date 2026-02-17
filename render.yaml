@@ -1,8 +1,8 @@
 services:
   - type: web
-    name: aoe2hd-backend
+    name: api-prodn
     env: docker
-    repo: https://github.com/emaren/aoe2hd-parsing
+    repo: https://github.com/Emaren/api-prodn
     branch: main
     plan: free
     autoDeploy: true
@@ -17,5 +17,5 @@ services:
         value: production
 
 databases:
-  - name: aoe2hd-db
+  - name: aoe2db
     plan: free
