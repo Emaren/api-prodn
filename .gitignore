@@ -28,6 +28,7 @@ node_modules/
 *.trace
 trace.index
 agent/logs/
+scripts/ip_timestamps.json
 
 # Firebase local secret
 serviceAccountKey.json
