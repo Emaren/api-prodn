@@ -1,15 +1,26 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Query, Header
+from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from db.db import get_db
-from db.models import GameStats, User
+from db.models import GameStats
 from datetime import datetime
-from routes.user_me import get_current_user
 import json
 import logging
+import os
+from typing import Optional
 
 router = APIRouter(prefix="/api", tags=["replay"])
+
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")  # set this in env
+
+
+async def require_internal_key(
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key")
+):
+    # If you set INTERNAL_API_KEY, enforce it. If not set, allow (dev convenience).
+    if INTERNAL_API_KEY and x_api_key != INTERNAL_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
 
 
 class ParseReplayRequest(BaseModel):
@@ -23,7 +34,7 @@ class ParseReplayRequest(BaseModel):
     game_type: str | None = None
     duration: int = 0
     winner: str = "Unknown"
-    players: list = []
+    players: list = Field(default_factory=list)  # ✅ FIX: no shared mutable default
     played_on: str | None = None
 
 
@@ -31,7 +42,8 @@ class ParseReplayRequest(BaseModel):
 async def parse_new_replay(
     data: ParseReplayRequest,
     db_gen=Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _: bool = Depends(require_internal_key),
+    user_uid: str = Header(default="system", alias="x-user-uid"),
     mode: str = Query(default=None),
 ):
     async with db_gen as db:
@@ -47,7 +59,7 @@ async def parse_new_replay(
                 return {"message": "Replay already parsed as final. Skipped."}
 
         game = GameStats(
-            user_uid=current_user.uid,  # ✅ Save user UID
+            user_uid=user_uid,
             replay_file=data.replay_file,
             replay_hash=data.replay_hash,
             game_version=data.game_version,
