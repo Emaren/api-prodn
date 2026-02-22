@@ -46,7 +46,7 @@ import asyncpg
 import asyncio
 
 async def init_db_async():
-    from db.models import Base
+    from db.base import Base
     auto_create = os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true"
     if not auto_create:
         logging.info("ℹ️ Skipping Base.metadata.create_all (AUTO_CREATE_TABLES != true).")

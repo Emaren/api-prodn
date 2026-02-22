@@ -1,26 +1,27 @@
-# db/models/user.py
-
-from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Integer, DateTime
-from .base import Base
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
+from db.base import Base
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, index=True)
     uid = Column(String(100), unique=True, nullable=False)
-    email = Column(String(100), unique=True, index=True)
-    in_game_name = Column(String(255), nullable=True, unique=True)
+    email = Column(String(100), unique=True, nullable=True)
+    in_game_name = Column(String, unique=True, nullable=True)
     verified = Column(Boolean, default=False, nullable=False)
     wallet_address = Column(String(100), nullable=True)
     lock_name = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
     token = Column(String(128), nullable=True)
-    last_seen = Column(DateTime, default=None)
-    is_admin = Column(Boolean, default=False, nullable=False)  # ✅ required for admin access
+    last_seen = Column(DateTime, nullable=True)
+    is_admin = Column(Boolean, default=False, nullable=False)
 
-    def __repr__(self):
-        return f"<User {self.uid}>"
+    # NEW
+    steam_id = Column(String(32), nullable=True)
+    steam_persona_name = Column(String(255), nullable=True)
+    verification_level = Column(Integer, default=0, nullable=False)
+    verification_method = Column(String(32), default="none", nullable=False)
+    verified_at = Column(DateTime, nullable=True)
 
     def to_dict(self):
         return {
@@ -35,4 +36,10 @@ class User(Base):
             "token": self.token,
             "last_seen": self.last_seen.isoformat() if self.last_seen else None,
             "is_admin": self.is_admin,
+
+            "steam_id": self.steam_id,
+            "steam_persona_name": self.steam_persona_name,
+            "verification_level": self.verification_level,
+            "verification_method": self.verification_method,
+            "verified_at": self.verified_at.isoformat() if self.verified_at else None,
         }
