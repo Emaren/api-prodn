@@ -7,7 +7,7 @@ from sqlalchemy import (
     UniqueConstraint, Index, ForeignKey
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from .base import Base
+from db.base import Base
 
 def is_render():
     return os.getenv("RENDER") == "1"
