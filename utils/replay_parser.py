@@ -2,7 +2,6 @@
 
 import os
 import io
-import json
 import logging
 import hashlib
 import aiofiles
@@ -29,10 +28,46 @@ async def parse_replay_full(replay_path):
         logging.error(f"❌ parse error: {e}")
         return None
 
+
+def _extract_event_types(summary_obj):
+    event_types = []
+    seen = set()
+
+    for action in getattr(summary_obj, "_actions", []):
+        if len(action) < 2:
+            continue
+        action_type = action[1]
+        name = getattr(action_type, "name", None)
+        if not name:
+            continue
+        label = str(name).lower()
+        if label in seen:
+            continue
+        seen.add(label)
+        event_types.append(label)
+
+    return event_types
+
+
+def _extract_resigned_player_numbers(summary_obj):
+    cache = getattr(summary_obj, "_cache", {})
+    resigned = cache.get("resigned", set()) if isinstance(cache, dict) else set()
+    try:
+        return sorted(int(player_number) for player_number in resigned)
+    except Exception:
+        return []
+
 def _parse_sync_bytes(replay_path, file_bytes):
     try:
         h = header.parse(file_bytes)
         s = summary.Summary(io.BytesIO(file_bytes))
+        completed = bool(s.get_completed())
+        raw_chat = s.get_chat()
+        raw_platform = s.get_platform()
+        chat = raw_chat if isinstance(raw_chat, list) else []
+        platform = raw_platform if isinstance(raw_platform, dict) else {}
+        restored = s.get_restored()
+        resigned_player_numbers = _extract_resigned_player_numbers(s)
 
         stats = {
             "game_version": str(h.version),
@@ -59,6 +94,22 @@ def _parse_sync_bytes(replay_path, file_bytes):
 
         stats["players"] = players
         stats["winner"] = winner or "Unknown"
+        stats["event_types"] = _extract_event_types(s)
+        stats["key_events"] = {
+            "completed": completed,
+            "has_achievements": bool(s.has_achievements()),
+            "postgame_available": s.get_postgame() is not None,
+            "owner_player_number": s.get_owner(),
+            "resigned_player_numbers": resigned_player_numbers,
+            "chat_count": len(chat),
+            "platform_id": platform.get("platform_id"),
+            "platform_match_id": platform.get("platform_match_id"),
+            "rated": platform.get("rated"),
+            "lobby_name": platform.get("lobby_name"),
+            "restored": bool(restored[0]) if isinstance(restored, tuple) and len(restored) > 0 else False,
+        }
+        stats["completed"] = completed
+        stats["disconnect_detected"] = not completed and len(resigned_player_numbers) == 0
 
         dt = extract_datetime_from_filename(os.path.basename(replay_path))
         stats["played_on"] = dt.isoformat() if dt else None

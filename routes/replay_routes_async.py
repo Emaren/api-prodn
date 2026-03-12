@@ -16,11 +16,12 @@ from sqlalchemy import update
 
 # Prefer full model set if present (User/ApiKey added in recent migration)
 try:
-    from db.models import GameStats, User, ApiKey
+    from db.models import GameStats, User, ApiKey, ReplayParseAttempt
 except Exception:  # pragma: no cover
     from db.models import GameStats  # type: ignore
     User = None  # type: ignore
     ApiKey = None  # type: ignore
+    ReplayParseAttempt = None  # type: ignore
 
 from utils.replay_parser import parse_replay_full, hash_replay_file
 
@@ -56,7 +57,10 @@ class ParseReplayRequest(BaseModel):
     game_duration: int | None = None
     winner: str = "Unknown"
     players: list = Field(default_factory=list)
+    event_types: list = Field(default_factory=list)
+    key_events: dict = Field(default_factory=dict)
     played_on: str | None = None
+    disconnect_detected: bool | None = None
     parse_source: str | None = None
     parse_reason: str | None = None
     original_filename: str | None = None
@@ -65,6 +69,11 @@ class ParseReplayRequest(BaseModel):
 def _safe_iso_datetime(value: str | None):
     if not value:
         return None
+
+
+def _clean_detail(value: str | None, fallback: str | None = None):
+    cleaned = " ".join((value or fallback or "").split()).strip()
+    return cleaned[:255] if cleaned else None
     try:
         normalized = value.replace("Z", "+00:00")
         return datetime.fromisoformat(normalized)
@@ -198,6 +207,126 @@ async def _resolve_upload_identity(db, x_api_key: Optional[str], claimed_uid: st
     return user.uid, "watcher"
 
 
+async def _load_user_by_uid(db, uid: Optional[str]):
+    if User is None or not uid or uid == "system":
+        return None
+    res = await db.execute(select(User).where(User.uid == uid))
+    return res.scalars().first()
+
+
+async def _record_parse_attempt(
+    db,
+    *,
+    user_uid: Optional[str],
+    replay_hash: Optional[str],
+    original_filename: Optional[str],
+    parse_source: str,
+    status: str,
+    detail: Optional[str],
+    upload_mode: Optional[str],
+    file_size_bytes: Optional[int],
+    game_stats_id: Optional[int] = None,
+    played_on=None,
+):
+    if ReplayParseAttempt is None:
+        return
+
+    db.add(
+        ReplayParseAttempt(
+            user_uid=user_uid,
+            replay_hash=replay_hash,
+            original_filename=original_filename,
+            parse_source=parse_source,
+            status=status,
+            detail=_clean_detail(detail),
+            upload_mode=upload_mode,
+            file_size_bytes=file_size_bytes,
+            game_stats_id=game_stats_id,
+            played_on=played_on,
+        )
+    )
+
+
+def _match_uploader_player(players: list, user, claimed_name: Optional[str]):
+    steam_id = str(getattr(user, "steam_id", "") or "").strip()
+    if steam_id:
+        for player in players:
+            if str(player.get("user_id", "") or "").strip() == steam_id:
+                return player
+
+    candidate_names = {
+        _norm_name(value)
+        for value in [
+            claimed_name,
+            getattr(user, "in_game_name", None),
+            getattr(user, "steam_persona_name", None),
+        ]
+        if value
+    }
+
+    for player in players:
+        if _norm_name(str(player.get("name", "") or "")) in candidate_names:
+            return player
+
+    return None
+
+
+def _infer_incomplete_watcher_outcome(parsed: dict, user, claimed_name: Optional[str], upload_mode: str):
+    winner = parsed.get("winner") or "Unknown"
+    players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
+    completed = parsed.get("completed")
+
+    if winner not in {"", None, "Unknown"}:
+        return None
+    if upload_mode != "watcher" or user is None:
+        return None
+    if completed is not False:
+        return None
+    if len(players) != 2:
+        return None
+
+    uploader_player = _match_uploader_player(players, user, claimed_name)
+    if not uploader_player:
+        return None
+
+    uploader_name = str(uploader_player.get("name", "") or "").strip()
+    opponents = [
+        dict(player)
+        for player in players
+        if _norm_name(str(player.get("name", "") or "")) != _norm_name(uploader_name)
+    ]
+    if len(opponents) != 1:
+        return None
+
+    inferred_winner = str(opponents[0].get("name", "") or "").strip()
+    if not inferred_winner:
+        return None
+
+    patched_players = []
+    for player in players:
+        updated = dict(player)
+        if _norm_name(str(updated.get("name", "") or "")) == _norm_name(inferred_winner):
+            updated["winner"] = True
+        elif _norm_name(str(updated.get("name", "") or "")) == _norm_name(uploader_name):
+            updated["winner"] = False
+        patched_players.append(updated)
+
+    key_events = dict(parsed.get("key_events") or {})
+    key_events["winner_inference"] = {
+        "type": "watcher_incomplete_1v1_opponent",
+        "uploader_player": uploader_name,
+        "inferred_winner": inferred_winner,
+    }
+
+    return {
+        "winner": inferred_winner,
+        "players": patched_players,
+        "disconnect_detected": True,
+        "parse_reason": "watcher_inferred_opponent_win_on_incomplete_1v1",
+        "key_events": key_events,
+    }
+
+
 async def _maybe_verify_user_from_replay(db, uploader_uid: str, players: list, claimed_name: Optional[str], method: str):
     """
     If user has a claimed in_game_name (or header provided) and it appears in parsed replay player list,
@@ -280,8 +409,11 @@ async def parse_new_replay(
             game_duration=duration,
             winner=data.winner,
             players=data.players,
+            event_types=data.event_types,
+            key_events=data.key_events,
             parse_iteration=data.parse_iteration,
             is_final=data.is_final,
+            disconnect_detected=bool(data.disconnect_detected),
             parse_source=data.parse_source or "json_parse",
             parse_reason=data.parse_reason or "json_submission",
             original_filename=data.original_filename,
@@ -324,30 +456,56 @@ async def upload_replay_file(
         await file.close()
 
     try:
-        parsed = await parse_replay_full(temp_path)
-        if not parsed:
-            raise HTTPException(
-                status_code=422,
-                detail="Failed to parse replay file. The replay may still be finalizing on disk; retry shortly.",
-            )
-
         replay_hash = await hash_replay_file(temp_path)
         if not replay_hash:
             raise HTTPException(status_code=500, detail="Failed to hash replay file")
 
-        map_info = parsed.get("map")
-        map_payload = {
-            "name": map_info.get("name", "Unknown") if isinstance(map_info, dict) else "Unknown",
-            "size": map_info.get("size", "Unknown") if isinstance(map_info, dict) else "Unknown",
-        }
-        players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
-        winner = parsed.get("winner") or "Unknown"
-        raw_duration = parsed.get("duration") or parsed.get("game_duration") or 0
-        duration = int(raw_duration) if isinstance(raw_duration, (int, float)) else 0
-        played_on = _safe_iso_datetime(parsed.get("played_on"))
+        parse_failure_detail = (
+            "Failed to parse replay file. The replay may still be finalizing on disk; retry shortly."
+        )
 
         async with db_gen as db:
             uploader_uid, mode = await _resolve_upload_identity(db, x_api_key, user_uid)
+            uploader_user = await _load_user_by_uid(db, uploader_uid)
+
+            parsed = await parse_replay_full(temp_path)
+            if not parsed:
+                await _record_parse_attempt(
+                    db,
+                    user_uid=uploader_uid,
+                    replay_hash=replay_hash,
+                    original_filename=original_name,
+                    parse_source="file_upload",
+                    status="parse_failed",
+                    detail=parse_failure_detail,
+                    upload_mode=mode,
+                    file_size_bytes=written,
+                )
+                await db.commit()
+                raise HTTPException(status_code=422, detail=parse_failure_detail)
+
+            map_info = parsed.get("map")
+            map_payload = {
+                "name": map_info.get("name", "Unknown") if isinstance(map_info, dict) else "Unknown",
+                "size": map_info.get("size", "Unknown") if isinstance(map_info, dict) else "Unknown",
+            }
+            players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
+            event_types = parsed.get("event_types") if isinstance(parsed.get("event_types"), list) else []
+            key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
+            winner = parsed.get("winner") or "Unknown"
+            raw_duration = parsed.get("duration") or parsed.get("game_duration") or 0
+            duration = int(raw_duration) if isinstance(raw_duration, (int, float)) else 0
+            played_on = _safe_iso_datetime(parsed.get("played_on"))
+            disconnect_detected = bool(parsed.get("disconnect_detected"))
+            parse_reason = "watcher_or_browser"
+
+            inferred_outcome = _infer_incomplete_watcher_outcome(parsed, uploader_user, x_player_name, mode)
+            if inferred_outcome:
+                players = inferred_outcome["players"]
+                winner = inferred_outcome["winner"]
+                disconnect_detected = inferred_outcome["disconnect_detected"]
+                parse_reason = inferred_outcome["parse_reason"]
+                key_events = inferred_outcome["key_events"]
 
             existing = await db.execute(
                 select(GameStats).where(
@@ -355,7 +513,22 @@ async def upload_replay_file(
                     GameStats.is_final.is_(True),
                 )
             )
-            if existing.scalars().first():
+            existing_game = existing.scalars().first()
+            if existing_game:
+                await _record_parse_attempt(
+                    db,
+                    user_uid=uploader_uid,
+                    replay_hash=replay_hash,
+                    original_filename=original_name,
+                    parse_source="file_upload",
+                    status="duplicate_final",
+                    detail="Replay already parsed as final. Skipped.",
+                    upload_mode=mode,
+                    file_size_bytes=written,
+                    game_stats_id=existing_game.id,
+                    played_on=played_on,
+                )
+                await db.commit()
                 return {
                     "message": "Replay already parsed as final. Skipped.",
                     "replay_hash": replay_hash,
@@ -390,10 +563,13 @@ async def upload_replay_file(
                 game_duration=duration,
                 winner=winner,
                 players=players,
+                event_types=event_types,
+                key_events=key_events,
                 parse_iteration=1,
                 is_final=True,
+                disconnect_detected=disconnect_detected,
                 parse_source="file_upload",
-                parse_reason="watcher_or_browser",
+                parse_reason=parse_reason,
                 original_filename=original_name,
                 played_on=played_on,
             )
@@ -415,6 +591,19 @@ async def upload_replay_file(
                 method = "watcher" if mode == "watcher" else "replay_upload"
                 await _maybe_verify_user_from_replay(db, uploader_uid, players, x_player_name, method)
 
+            await _record_parse_attempt(
+                db,
+                user_uid=uploader_uid,
+                replay_hash=replay_hash,
+                original_filename=original_name,
+                parse_source="file_upload",
+                status="stored",
+                detail="Replay parsed and stored",
+                upload_mode=mode,
+                file_size_bytes=written,
+                game_stats_id=game.id,
+                played_on=played_on,
+            )
             await db.commit()
 
         return {
