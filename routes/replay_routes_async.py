@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import base64
 import re
+from sqlalchemy import update
 
 # Prefer full model set if present (User/ApiKey added in recent migration)
 try:
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/api", tags=["replay"])
 
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")  # optional; if set, enforces auth for uploads
 MAX_REPLAY_UPLOAD_BYTES = int(os.getenv("MAX_REPLAY_UPLOAD_BYTES", str(250 * 1024 * 1024)))
+SUPERSEDED_PARSE_REASON = "superseded_by_later_upload"
 
 WATCHER_KEY_RE = re.compile(r"^wolo_([a-f0-9]{12})_(.+)$", re.IGNORECASE)
 
@@ -361,6 +363,22 @@ async def upload_replay_file(
                     "upload_mode": mode,
                 }
 
+            previous_versions = []
+            if original_name and uploader_uid and uploader_uid != "system":
+                prior = await db.execute(
+                    select(GameStats.id, GameStats.replay_hash).where(
+                        GameStats.user_uid == uploader_uid,
+                        GameStats.original_filename == original_name,
+                        GameStats.is_final.is_(True),
+                        GameStats.parse_source == "file_upload",
+                    )
+                )
+                previous_versions = [
+                    row.id
+                    for row in prior
+                    if row.replay_hash != replay_hash
+                ]
+
             game = GameStats(
                 user_uid=uploader_uid or "system",
                 replay_file=original_name,
@@ -380,6 +398,17 @@ async def upload_replay_file(
                 played_on=played_on,
             )
             db.add(game)
+            await db.flush()
+
+            if previous_versions:
+                await db.execute(
+                    update(GameStats)
+                    .where(GameStats.id.in_(previous_versions))
+                    .values(
+                        is_final=False,
+                        parse_reason=SUPERSEDED_PARSE_REASON,
+                    )
+                )
 
             # Auto-verify when upload is proof-tied (watcher) or trusted (internal + x-user-uid)
             if uploader_uid and uploader_uid != "system":
