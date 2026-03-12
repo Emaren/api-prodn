@@ -324,7 +324,10 @@ async def upload_replay_file(
     try:
         parsed = await parse_replay_full(temp_path)
         if not parsed:
-            raise HTTPException(status_code=422, detail="Failed to parse replay file")
+            raise HTTPException(
+                status_code=422,
+                detail="Failed to parse replay file. The replay may still be finalizing on disk; retry shortly.",
+            )
 
         replay_hash = await hash_replay_file(temp_path)
         if not replay_hash:
