@@ -57,6 +57,39 @@ def _extract_resigned_player_numbers(summary_obj):
     except Exception:
         return []
 
+
+def _extract_hd_player_ratings(parsed_header):
+    hd = getattr(parsed_header, "hd", None)
+    players = getattr(hd, "players", None)
+    if not players:
+        return {}
+
+    ratings = {}
+
+    for player in players:
+        try:
+            player_number = int(getattr(player, "player_number", -1))
+        except Exception:
+            continue
+
+        if player_number <= 0:
+            continue
+
+        steam_id = getattr(player, "steam_id", None)
+        if isinstance(steam_id, int) and steam_id <= 0:
+            steam_id = None
+
+        rm_rating = getattr(player, "hd_rm_rating", None)
+        dm_rating = getattr(player, "hd_dm_rating", None)
+
+        ratings[player_number] = {
+            "steam_id": str(steam_id) if steam_id else None,
+            "steam_rm_rating": int(rm_rating) if isinstance(rm_rating, int) else None,
+            "steam_dm_rating": int(dm_rating) if isinstance(dm_rating, int) else None,
+        }
+
+    return ratings
+
 def _parse_sync_bytes(replay_path, file_bytes):
     try:
         h = header.parse(file_bytes)
@@ -68,6 +101,7 @@ def _parse_sync_bytes(replay_path, file_bytes):
         platform = raw_platform if isinstance(raw_platform, dict) else {}
         restored = s.get_restored()
         resigned_player_numbers = _extract_resigned_player_numbers(s)
+        hd_player_ratings = _extract_hd_player_ratings(h)
 
         stats = {
             "game_version": str(h.version),
@@ -82,12 +116,19 @@ def _parse_sync_bytes(replay_path, file_bytes):
         players = []
         winner = None
         for p in s.get_players():
+            player_ratings = hd_player_ratings.get(p.get("number")) or {}
+            rate_snapshot = p.get("rate_snapshot")
             p_data = {
                 "name": p.get("name", "Unknown"),
                 "civilization": p.get("civilization", "Unknown"),
                 "winner": p.get("winner", False),
                 "score": p.get("score", 0),
+                "steam_id": player_ratings.get("steam_id") or (str(p.get("user_id")) if p.get("user_id") else None),
+                "steam_rm_rating": player_ratings.get("steam_rm_rating"),
+                "steam_dm_rating": player_ratings.get("steam_dm_rating"),
             }
+            if isinstance(rate_snapshot, (int, float)) and p_data["steam_rm_rating"] is None:
+                p_data["steam_rm_rating"] = int(rate_snapshot)
             players.append(p_data)
             if p_data["winner"]:
                 winner = p_data["name"]
