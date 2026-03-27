@@ -2,6 +2,10 @@
 
 Production FastAPI backend for AoE2HDBets.
 
+## Canonical docs
+
+- [TESTING.md](/Users/tonyblum/projects/AoE2HDBets/api-prodn/TESTING.md)
+
 ## Responsibilities
 
 - Replay ingestion and parsing
@@ -30,7 +34,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 alembic upgrade head
-uvicorn app:app --reload --host 0.0.0.0 --port 8002
+uvicorn app:app --reload --host 127.0.0.1 --port 3330
 ```
 
 ## Environment
@@ -70,6 +74,13 @@ alembic upgrade head
 ## Deployment model
 
 - Local MBP -> push `main` -> VPS pull `main` -> restart service.
+
+## Production runtime truth
+
+- VPS repo path: `/var/www/AoE2HDBets/api-prodn`
+- service: `aoe2hdbets-api.service`
+- production bind: `127.0.0.1:3330`
+- production entrypoint: `uvicorn app:app`
 
 ## Admin bootstrap
 
