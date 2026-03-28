@@ -4,6 +4,7 @@ import os
 import io
 import logging
 import hashlib
+import math
 import aiofiles
 import asyncio
 from mgz import header, summary
@@ -225,6 +226,18 @@ def _extract_platform_ratings(platform):
     return platform_ratings
 
 
+def _normalize_mgz_duration_seconds(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+
+    numeric = float(value)
+    if numeric <= 0:
+        return None
+
+    # mgz full-summary durations/timestamps are accumulated in milliseconds.
+    return max(1, int(math.ceil(numeric / 1000.0)))
+
+
 def _extract_chat_preview(chat):
     if not isinstance(chat, list) or not chat:
         return []
@@ -235,9 +248,7 @@ def _extract_chat_preview(chat):
             continue
 
         timestamp = raw_entry.get("timestamp")
-        timestamp_seconds = None
-        if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
-            timestamp_seconds = int(timestamp // 1000 if timestamp > 1000 else timestamp)
+        timestamp_seconds = _normalize_mgz_duration_seconds(timestamp)
 
         message = raw_entry.get("message")
         preview.append(
@@ -253,6 +264,45 @@ def _extract_chat_preview(chat):
 
     return [entry for entry in preview if _has_meaningful_value(entry)]
 
+
+def _apply_hd_early_exit_rules(stats):
+    if str(stats.get("game_version") or "").strip() != "Version.HD":
+        return stats
+
+    duration_seconds = stats.get("duration")
+    if not isinstance(duration_seconds, int) or duration_seconds <= 0 or duration_seconds >= 60:
+        return stats
+
+    key_events = stats.get("key_events") if isinstance(stats.get("key_events"), dict) else {}
+    resigned_player_numbers = key_events.get("resigned_player_numbers")
+    has_resign = isinstance(resigned_player_numbers, list) and len(resigned_player_numbers) > 0
+    is_rated = bool(key_events.get("rated"))
+
+    if not is_rated or not (has_resign or stats.get("disconnect_detected")):
+        return stats
+
+    suppressed_winner = stats.get("winner")
+    stats["winner"] = "Unknown"
+    stats["completed"] = False
+    stats["disconnect_detected"] = True
+    stats["parse_reason"] = "hd_early_exit_under_60s"
+
+    players = stats.get("players") if isinstance(stats.get("players"), list) else []
+    for player in players:
+        if isinstance(player, dict):
+            player["winner"] = None
+
+    key_events["completed"] = False
+    key_events["early_exit_under_60s"] = True
+    key_events["no_rated_result"] = True
+    key_events["early_exit_seconds"] = duration_seconds
+    if suppressed_winner and suppressed_winner != "Unknown":
+        key_events["suppressed_winner"] = suppressed_winner
+
+    stats["key_events"] = key_events
+    return stats
+
+
 def _parse_sync_bytes(replay_path, file_bytes):
     try:
         h = header.parse(file_bytes)
@@ -267,6 +317,8 @@ def _parse_sync_bytes(replay_path, file_bytes):
         hd_player_ratings = _extract_hd_player_ratings(h)
         platform_ratings = _extract_platform_ratings(platform)
         owner_player_number = s.get_owner()
+        raw_duration_ms = s.get_duration()
+        normalized_duration_seconds = _normalize_mgz_duration_seconds(raw_duration_ms)
 
         stats = {
             "game_version": str(h.version),
@@ -275,7 +327,7 @@ def _parse_sync_bytes(replay_path, file_bytes):
                 "size": s.get_map().get("size", "Unknown"),
             },
             "game_type": str(s.get_version()),
-            "duration": int(s.get_duration() // 1000 if s.get_duration() > 48 * 3600 else s.get_duration()),
+            "duration": normalized_duration_seconds or 0,
         }
 
         players = []
@@ -349,6 +401,8 @@ def _parse_sync_bytes(replay_path, file_bytes):
             "rated": platform.get("rated"),
             "lobby_name": platform.get("lobby_name"),
             "restored": bool(restored[0]) if isinstance(restored, tuple) and len(restored) > 0 else False,
+            "raw_duration_ms": int(raw_duration_ms) if isinstance(raw_duration_ms, (int, float)) else None,
+            "duration_source": "mgz_summary_ms_normalized",
         }
         settings_summary = _extract_settings_summary(s)
         if settings_summary:
@@ -363,6 +417,7 @@ def _parse_sync_bytes(replay_path, file_bytes):
 
         dt = extract_datetime_from_filename(os.path.basename(replay_path))
         stats["played_on"] = dt.isoformat() if dt else None
+        stats = _apply_hd_early_exit_rules(stats)
 
         logging.info(f"✅ parse_replay_full => {replay_path}")
         return stats

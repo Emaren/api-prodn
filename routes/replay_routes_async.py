@@ -70,15 +70,16 @@ def _safe_iso_datetime(value: str | None):
     if not value:
         return None
 
-
-def _clean_detail(value: str | None, fallback: str | None = None):
-    cleaned = " ".join((value or fallback or "").split()).strip()
-    return cleaned[:255] if cleaned else None
     try:
         normalized = value.replace("Z", "+00:00")
         return datetime.fromisoformat(normalized)
     except ValueError:
         return None
+
+
+def _clean_detail(value: str | None, fallback: str | None = None):
+    cleaned = " ".join((value or fallback or "").split()).strip()
+    return cleaned[:255] if cleaned else None
 
 
 def _map_payload(data: ParseReplayRequest):
@@ -275,10 +276,13 @@ def _infer_incomplete_watcher_outcome(parsed: dict, user, claimed_name: Optional
     winner = parsed.get("winner") or "Unknown"
     players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
     completed = parsed.get("completed")
+    key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
 
     if winner not in {"", None, "Unknown"}:
         return None
     if upload_mode != "watcher" or user is None:
+        return None
+    if parsed.get("parse_reason") == "hd_early_exit_under_60s" or key_events.get("no_rated_result"):
         return None
     if completed is not False:
         return None
@@ -497,7 +501,7 @@ async def upload_replay_file(
             duration = int(raw_duration) if isinstance(raw_duration, (int, float)) else 0
             played_on = _safe_iso_datetime(parsed.get("played_on"))
             disconnect_detected = bool(parsed.get("disconnect_detected"))
-            parse_reason = "watcher_or_browser"
+            parse_reason = str(parsed.get("parse_reason") or "watcher_or_browser")
 
             inferred_outcome = _infer_incomplete_watcher_outcome(parsed, uploader_user, x_player_name, mode)
             if inferred_outcome:
