@@ -82,6 +82,59 @@ def _clean_detail(value: str | None, fallback: str | None = None):
     return cleaned[:255] if cleaned else None
 
 
+def _parse_bool_header(value: Optional[str], default: bool) -> bool:
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on", "final"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "live"}:
+        return False
+    return default
+
+
+def _parse_positive_int_header(value: Optional[str], default: int = 1) -> int:
+    if value is None:
+        return default
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+
+    return parsed if parsed > 0 else default
+
+
+def _derive_upload_parse_metadata(
+    *,
+    upload_mode: str,
+    is_final: bool,
+    requested_source: Optional[str],
+    requested_reason: Optional[str],
+    parsed_reason: Optional[str],
+) -> Tuple[str, str]:
+    parse_source = _clean_detail(requested_source)
+    parse_reason = _clean_detail(requested_reason)
+    parsed_reason_clean = _clean_detail(parsed_reason)
+
+    if not parse_source:
+        if upload_mode == "watcher":
+            parse_source = "watcher_final" if is_final else "watcher_live"
+        else:
+            parse_source = "file_upload"
+
+    if not parse_reason:
+        if parsed_reason_clean and parsed_reason_clean != "watcher_or_browser":
+            parse_reason = parsed_reason_clean
+        elif upload_mode == "watcher":
+            parse_reason = "watcher_final_submission" if is_final else "watcher_live_iteration"
+        else:
+            parse_reason = "watcher_or_browser"
+
+    return parse_source, parse_reason
+
+
 def _map_payload(data: ParseReplayRequest):
     map_payload = data.map if isinstance(data.map, dict) else {}
     map_name = data.map_name
@@ -436,6 +489,10 @@ async def upload_replay_file(
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
     user_uid: str = Header(default="system", alias="x-user-uid"),
     x_player_name: Optional[str] = Header(default=None, alias="x-player-name"),
+    x_parse_iteration: Optional[str] = Header(default=None, alias="x-parse-iteration"),
+    x_is_final: Optional[str] = Header(default=None, alias="x-is-final"),
+    x_parse_source: Optional[str] = Header(default=None, alias="x-parse-source"),
+    x_parse_reason: Optional[str] = Header(default=None, alias="x-parse-reason"),
 ):
     original_name = file.filename or "replay.aoe2record"
     suffix = Path(original_name).suffix.lower()
@@ -471,6 +528,15 @@ async def upload_replay_file(
         async with db_gen as db:
             uploader_uid, mode = await _resolve_upload_identity(db, x_api_key, user_uid)
             uploader_user = await _load_user_by_uid(db, uploader_uid)
+            is_final_upload = _parse_bool_header(x_is_final, True)
+            parse_iteration = _parse_positive_int_header(x_parse_iteration, 1)
+            parse_source_hint, _ = _derive_upload_parse_metadata(
+                upload_mode=mode,
+                is_final=is_final_upload,
+                requested_source=x_parse_source,
+                requested_reason=x_parse_reason,
+                parsed_reason=None,
+            )
 
             parsed = await parse_replay_full(temp_path)
             if not parsed:
@@ -479,7 +545,7 @@ async def upload_replay_file(
                     user_uid=uploader_uid,
                     replay_hash=replay_hash,
                     original_filename=original_name,
-                    parse_source="file_upload",
+                    parse_source=parse_source_hint,
                     status="parse_failed",
                     detail=parse_failure_detail,
                     upload_mode=mode,
@@ -501,9 +567,22 @@ async def upload_replay_file(
             duration = int(raw_duration) if isinstance(raw_duration, (int, float)) else 0
             played_on = _safe_iso_datetime(parsed.get("played_on"))
             disconnect_detected = bool(parsed.get("disconnect_detected"))
-            parse_reason = str(parsed.get("parse_reason") or "watcher_or_browser")
+            parse_source, parse_reason = _derive_upload_parse_metadata(
+                upload_mode=mode,
+                is_final=is_final_upload,
+                requested_source=x_parse_source,
+                requested_reason=x_parse_reason,
+                parsed_reason=parsed.get("parse_reason"),
+            )
 
-            inferred_outcome = _infer_incomplete_watcher_outcome(parsed, uploader_user, x_player_name, mode)
+            inferred_outcome = None
+            if is_final_upload:
+                inferred_outcome = _infer_incomplete_watcher_outcome(
+                    parsed,
+                    uploader_user,
+                    x_player_name,
+                    mode,
+                )
             if inferred_outcome:
                 players = inferred_outcome["players"]
                 winner = inferred_outcome["winner"]
@@ -511,25 +590,25 @@ async def upload_replay_file(
                 parse_reason = inferred_outcome["parse_reason"]
                 key_events = inferred_outcome["key_events"]
 
-            existing = await db.execute(
+            existing_final = await db.execute(
                 select(GameStats).where(
                     GameStats.replay_hash == replay_hash,
                     GameStats.is_final.is_(True),
                 )
             )
-            existing_game = existing.scalars().first()
-            if existing_game:
+            existing_final_game = existing_final.scalars().first()
+            if existing_final_game:
                 await _record_parse_attempt(
                     db,
                     user_uid=uploader_uid,
                     replay_hash=replay_hash,
                     original_filename=original_name,
-                    parse_source="file_upload",
+                    parse_source=parse_source,
                     status="duplicate_final",
                     detail="Replay already parsed as final. Skipped.",
                     upload_mode=mode,
                     file_size_bytes=written,
-                    game_stats_id=existing_game.id,
+                    game_stats_id=existing_final_game.id,
                     played_on=played_on,
                 )
                 await db.commit()
@@ -540,14 +619,44 @@ async def upload_replay_file(
                     "upload_mode": mode,
                 }
 
+            if not is_final_upload:
+                existing_live = await db.execute(
+                    select(GameStats).where(
+                        GameStats.replay_hash == replay_hash,
+                        GameStats.is_final.is_(False),
+                    )
+                )
+                existing_live_game = existing_live.scalars().first()
+                if existing_live_game:
+                    await _record_parse_attempt(
+                        db,
+                        user_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_filename=original_name,
+                        parse_source=parse_source,
+                        status="duplicate_live",
+                        detail="Replay iteration already stored. Skipped.",
+                        upload_mode=mode,
+                        file_size_bytes=written,
+                        game_stats_id=existing_live_game.id,
+                        played_on=played_on,
+                    )
+                    await db.commit()
+                    return {
+                        "message": "Replay iteration already stored. Skipped.",
+                        "replay_hash": replay_hash,
+                        "uploader_uid": uploader_uid,
+                        "upload_mode": mode,
+                        "parse_iteration": existing_live_game.parse_iteration,
+                    }
+
             previous_versions = []
-            if original_name and uploader_uid and uploader_uid != "system":
+            if is_final_upload and original_name and uploader_uid and uploader_uid != "system":
                 prior = await db.execute(
                     select(GameStats.id, GameStats.replay_hash).where(
                         GameStats.user_uid == uploader_uid,
                         GameStats.original_filename == original_name,
                         GameStats.is_final.is_(True),
-                        GameStats.parse_source == "file_upload",
                     )
                 )
                 previous_versions = [
@@ -569,10 +678,10 @@ async def upload_replay_file(
                 players=players,
                 event_types=event_types,
                 key_events=key_events,
-                parse_iteration=1,
-                is_final=True,
+                parse_iteration=parse_iteration,
+                is_final=is_final_upload,
                 disconnect_detected=disconnect_detected,
-                parse_source="file_upload",
+                parse_source=parse_source,
                 parse_reason=parse_reason,
                 original_filename=original_name,
                 played_on=played_on,
@@ -580,7 +689,7 @@ async def upload_replay_file(
             db.add(game)
             await db.flush()
 
-            if previous_versions:
+            if is_final_upload and previous_versions:
                 await db.execute(
                     update(GameStats)
                     .where(GameStats.id.in_(previous_versions))
@@ -591,7 +700,7 @@ async def upload_replay_file(
                 )
 
             # Auto-verify when upload is proof-tied (watcher) or trusted (internal + x-user-uid)
-            if uploader_uid and uploader_uid != "system":
+            if is_final_upload and uploader_uid and uploader_uid != "system":
                 method = "watcher" if mode == "watcher" else "replay_upload"
                 await _maybe_verify_user_from_replay(db, uploader_uid, players, x_player_name, method)
 
@@ -600,9 +709,9 @@ async def upload_replay_file(
                 user_uid=uploader_uid,
                 replay_hash=replay_hash,
                 original_filename=original_name,
-                parse_source="file_upload",
+                parse_source=parse_source,
                 status="stored",
-                detail="Replay parsed and stored",
+                detail="Replay parsed and stored" if is_final_upload else f"Replay iteration {parse_iteration} stored",
                 upload_mode=mode,
                 file_size_bytes=written,
                 game_stats_id=game.id,
@@ -611,12 +720,14 @@ async def upload_replay_file(
             await db.commit()
 
         return {
-            "message": "Replay parsed and stored",
+            "message": "Replay parsed and stored" if is_final_upload else f"Replay iteration {parse_iteration} stored",
             "replay_hash": replay_hash,
             "winner": winner,
             "players_count": len(players),
             "uploader_uid": uploader_uid,
             "upload_mode": mode,
+            "parse_iteration": parse_iteration,
+            "is_final": is_final_upload,
         }
     finally:
         try:
