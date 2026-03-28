@@ -40,6 +40,95 @@ def derived_parse_reason(row_parse_source, parsed_parse_reason):
     return "unspecified"
 
 
+def norm_name(value):
+    return str(value or "").strip().lower()
+
+
+def match_uploader_player(players, row_user):
+    if not isinstance(players, list) or not row_user:
+        return None
+
+    steam_id = str(row_user.get("steam_id") or "").strip()
+    if steam_id:
+        for player in players:
+            if str(player.get("user_id") or "").strip() == steam_id:
+                return player
+
+    candidate_names = {
+        norm_name(value)
+        for value in [
+            row_user.get("claimed_name"),
+            row_user.get("in_game_name"),
+            row_user.get("steam_persona_name"),
+        ]
+        if value
+    }
+
+    for player in players:
+        if norm_name(player.get("name")) in candidate_names:
+            return player
+
+    return None
+
+
+def infer_incomplete_uploader_outcome(snapshot, row_user):
+    winner = snapshot.get("winner") or "Unknown"
+    players = snapshot.get("players") if isinstance(snapshot.get("players"), list) else []
+    key_events = snapshot.get("key_events") if isinstance(snapshot.get("key_events"), dict) else {}
+
+    if winner not in {"", None, "Unknown"}:
+        return snapshot
+    if snapshot.get("parse_reason") == EARLY_EXIT_PARSE_REASON or key_events.get("no_rated_result"):
+        return snapshot
+    if key_events.get("completed") is not False:
+        return snapshot
+    if not key_events.get("rated"):
+        return snapshot
+    if len(players) != 2:
+        return snapshot
+
+    uploader_player = match_uploader_player(players, row_user)
+    if not uploader_player:
+        return snapshot
+
+    uploader_name = str(uploader_player.get("name") or "").strip()
+    opponents = [
+        dict(player)
+        for player in players
+        if norm_name(player.get("name")) != norm_name(uploader_name)
+    ]
+    if len(opponents) != 1:
+        return snapshot
+
+    inferred_winner = str(opponents[0].get("name") or "").strip()
+    if not inferred_winner:
+        return snapshot
+
+    patched_players = []
+    for player in players:
+        updated = dict(player)
+        if norm_name(updated.get("name")) == norm_name(inferred_winner):
+            updated["winner"] = True
+        elif norm_name(updated.get("name")) == norm_name(uploader_name):
+            updated["winner"] = False
+        patched_players.append(updated)
+
+    next_key_events = dict(key_events)
+    next_key_events["winner_inference"] = {
+        "type": "uploader_incomplete_1v1_opponent",
+        "uploader_player": uploader_name,
+        "inferred_winner": inferred_winner,
+    }
+
+    next_snapshot = dict(snapshot)
+    next_snapshot["winner"] = inferred_winner
+    next_snapshot["players"] = patched_players
+    next_snapshot["disconnect_detected"] = True
+    next_snapshot["parse_reason"] = "watcher_inferred_opponent_win_on_incomplete_1v1"
+    next_snapshot["key_events"] = next_key_events
+    return next_snapshot
+
+
 def build_row_snapshot(row):
     (
         _game_id,
@@ -57,6 +146,10 @@ def build_row_snapshot(row):
         parse_source,
         parse_reason,
         played_on,
+        _user_uid,
+        _steam_id,
+        _in_game_name,
+        _steam_persona_name,
     ) = row
 
     return {
@@ -73,6 +166,17 @@ def build_row_snapshot(row):
         "parse_source": parse_source,
         "parse_reason": parse_reason,
         "played_on": iso_or_none(played_on.isoformat() if played_on else None),
+    }
+
+
+def build_row_user(row):
+    return {
+        "original_filename": row[1],
+        "user_uid": row[15],
+        "steam_id": row[16],
+        "in_game_name": row[17],
+        "steam_persona_name": row[18],
+        "claimed_name": row[17],
     }
 
 
@@ -142,26 +246,45 @@ def main():
 
     query = """
         select
-            id,
-            original_filename,
-            game_version,
-            map,
-            game_type,
-            duration,
-            game_duration,
-            winner,
-            players,
-            event_types,
-            key_events,
-            disconnect_detected,
-            parse_source,
-            parse_reason,
-            played_on
+            game_stats.id,
+            game_stats.original_filename,
+            game_stats.game_version,
+            game_stats.map,
+            game_stats.game_type,
+            game_stats.duration,
+            game_stats.game_duration,
+            game_stats.winner,
+            game_stats.players,
+            game_stats.event_types,
+            game_stats.key_events,
+            game_stats.disconnect_detected,
+            game_stats.parse_source,
+            game_stats.parse_reason,
+            game_stats.played_on
+            ,
+            game_stats.user_uid,
+            users.steam_id,
+            users.in_game_name,
+            users.steam_persona_name
         from game_stats
-        where is_final = true
-          and original_filename is not null
-          and parse_reason = %s
-        order by id
+        left join users on users.uid = game_stats.user_uid
+        where game_stats.is_final = true
+          and game_stats.original_filename is not null
+          and (
+            game_stats.parse_reason = %s
+            or game_stats.played_on is null
+            or (
+              game_stats.winner = 'Unknown'
+              and coalesce(game_stats.key_events->>'no_rated_result', 'false') <> 'true'
+              and coalesce(game_stats.key_events->>'rated', 'false') = 'true'
+              and coalesce(game_stats.key_events->>'completed', 'true') = 'false'
+              and jsonb_typeof(game_stats.players) = 'array'
+              and jsonb_array_length(game_stats.players) = 2
+              and coalesce(game_stats.user_uid, '') <> ''
+              and game_stats.user_uid <> 'system'
+            )
+          )
+        order by game_stats.id
     """
 
     with psycopg.connect(args.database_url) as conn:
@@ -185,7 +308,9 @@ def main():
                     continue
 
                 current_snapshot = build_row_snapshot(row)
+                row_user = build_row_user(row)
                 next_snapshot = build_parsed_snapshot(row[12], parsed)
+                next_snapshot = infer_incomplete_uploader_outcome(next_snapshot, row_user)
                 if not snapshots_differ(current_snapshot, next_snapshot):
                     continue
 

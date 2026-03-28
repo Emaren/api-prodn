@@ -351,7 +351,7 @@ def _match_uploader_player(players: list, user, claimed_name: Optional[str]):
     return None
 
 
-def _infer_incomplete_watcher_outcome(parsed: dict, user, claimed_name: Optional[str], upload_mode: str):
+def _infer_incomplete_uploader_outcome(parsed: dict, user, claimed_name: Optional[str]):
     winner = parsed.get("winner") or "Unknown"
     players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
     completed = parsed.get("completed")
@@ -359,13 +359,15 @@ def _infer_incomplete_watcher_outcome(parsed: dict, user, claimed_name: Optional
 
     if winner not in {"", None, "Unknown"}:
         return None
-    if upload_mode != "watcher" or user is None:
+    if user is None:
         return None
     if parsed.get("parse_reason") == "hd_early_exit_under_60s" or key_events.get("no_rated_result"):
         return None
     if completed is not False:
         return None
     if len(players) != 2:
+        return None
+    if not key_events.get("rated"):
         return None
 
     uploader_player = _match_uploader_player(players, user, claimed_name)
@@ -396,7 +398,7 @@ def _infer_incomplete_watcher_outcome(parsed: dict, user, claimed_name: Optional
 
     key_events = dict(parsed.get("key_events") or {})
     key_events["winner_inference"] = {
-        "type": "watcher_incomplete_1v1_opponent",
+        "type": "uploader_incomplete_1v1_opponent",
         "uploader_player": uploader_name,
         "inferred_winner": inferred_winner,
     }
@@ -469,8 +471,33 @@ async def parse_new_replay(
         duration = int(raw_duration) if isinstance(raw_duration, (int, float)) else 0
         map_payload = _map_payload(data)
         played_on = _safe_iso_datetime(data.played_on)
+        players = data.players
+        key_events = data.key_events if isinstance(data.key_events, dict) else {}
+        winner = data.winner
+        disconnect_detected = bool(data.disconnect_detected)
+        parse_reason = data.parse_reason or "json_submission"
 
         if mode == "final" and data.is_final:
+            uploader_user = await _load_user_by_uid(db, user_uid)
+            inferred_outcome = _infer_incomplete_uploader_outcome(
+                {
+                    "winner": winner,
+                    "players": players,
+                    "completed": key_events.get("completed"),
+                    "key_events": key_events,
+                    "disconnect_detected": disconnect_detected,
+                    "parse_reason": parse_reason,
+                },
+                uploader_user,
+                None,
+            )
+            if inferred_outcome:
+                players = inferred_outcome["players"]
+                winner = inferred_outcome["winner"]
+                disconnect_detected = inferred_outcome["disconnect_detected"]
+                parse_reason = inferred_outcome["parse_reason"]
+                key_events = inferred_outcome["key_events"]
+
             existing = await db.execute(
                 select(GameStats).where(
                     GameStats.replay_hash == data.replay_hash,
@@ -503,15 +530,15 @@ async def parse_new_replay(
             game_type=data.game_type,
             duration=duration,
             game_duration=duration,
-            winner=data.winner,
-            players=data.players,
+            winner=winner,
+            players=players,
             event_types=data.event_types,
-            key_events=data.key_events,
+            key_events=key_events,
             parse_iteration=data.parse_iteration,
             is_final=data.is_final,
-            disconnect_detected=bool(data.disconnect_detected),
+            disconnect_detected=disconnect_detected,
             parse_source=data.parse_source or "json_parse",
-            parse_reason=data.parse_reason or "json_submission",
+            parse_reason=parse_reason,
             original_filename=data.original_filename,
             played_on=played_on,
         )
@@ -616,11 +643,10 @@ async def upload_replay_file(
 
             inferred_outcome = None
             if is_final_upload:
-                inferred_outcome = _infer_incomplete_watcher_outcome(
+                inferred_outcome = _infer_incomplete_uploader_outcome(
                     parsed,
                     uploader_user,
                     x_player_name,
-                    mode,
                 )
             if inferred_outcome:
                 players = inferred_outcome["players"]
