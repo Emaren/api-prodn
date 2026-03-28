@@ -412,6 +412,41 @@ def _infer_incomplete_uploader_outcome(parsed: dict, user, claimed_name: Optiona
     }
 
 
+def _coerce_positive_int(value):
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        numeric = int(value)
+        return numeric if numeric > 0 else 0
+    if isinstance(value, str):
+        try:
+            numeric = int(value.strip())
+            return numeric if numeric > 0 else 0
+        except ValueError:
+            return 0
+    return 0
+
+
+def _key_event_chat_count(value):
+    if isinstance(value, dict):
+        return _coerce_positive_int(value.get("chat_count"))
+    return 0
+
+
+def _should_refresh_reviewed_match(existing_game, incoming_duration: int, incoming_key_events: dict):
+    existing_duration = _coerce_positive_int(getattr(existing_game, "duration", 0))
+    incoming_duration = _coerce_positive_int(incoming_duration)
+    if incoming_duration <= existing_duration:
+        return False
+
+    if incoming_duration >= existing_duration + 60:
+        return True
+
+    existing_chat_count = _key_event_chat_count(getattr(existing_game, "key_events", {}) or {})
+    incoming_chat_count = _key_event_chat_count(incoming_key_events)
+    return incoming_chat_count >= existing_chat_count + 3 and incoming_duration >= existing_duration + 30
+
+
 async def _maybe_verify_user_from_replay(db, uploader_uid: str, players: list, claimed_name: Optional[str], method: str):
     """
     If user has a claimed in_game_name (or header provided) and it appears in parsed replay player list,
@@ -691,6 +726,57 @@ async def upload_replay_file(
                     platform_match_id,
                 )
                 if existing_platform_match and existing_platform_match.replay_hash != replay_hash:
+                    if _should_refresh_reviewed_match(existing_platform_match, duration, key_events):
+                        existing_platform_match.user_uid = uploader_uid or existing_platform_match.user_uid
+                        existing_platform_match.replay_file = original_name
+                        existing_platform_match.replay_hash = replay_hash
+                        existing_platform_match.game_version = parsed.get("game_version")
+                        existing_platform_match.map = map_payload
+                        existing_platform_match.game_type = parsed.get("game_type")
+                        existing_platform_match.duration = duration
+                        existing_platform_match.game_duration = duration
+                        existing_platform_match.winner = winner
+                        existing_platform_match.players = players
+                        existing_platform_match.event_types = event_types
+                        existing_platform_match.key_events = key_events
+                        existing_platform_match.parse_iteration = parse_iteration
+                        existing_platform_match.is_final = True
+                        existing_platform_match.disconnect_detected = disconnect_detected
+                        existing_platform_match.parse_source = parse_source
+                        existing_platform_match.parse_reason = parse_reason
+                        existing_platform_match.original_filename = original_name
+                        existing_platform_match.timestamp = datetime.utcnow()
+                        if played_on is not None:
+                            existing_platform_match.played_on = played_on
+
+                        if uploader_uid and uploader_uid != "system":
+                            method = "watcher" if mode == "watcher" else "replay_upload"
+                            await _maybe_verify_user_from_replay(db, uploader_uid, players, x_player_name, method)
+
+                        await _record_parse_attempt(
+                            db,
+                            user_uid=uploader_uid,
+                            replay_hash=replay_hash,
+                            original_filename=original_name,
+                            parse_source=parse_source,
+                            status="reviewed_match_refreshed",
+                            detail="Reviewed match refreshed with later, more complete final replay data.",
+                            upload_mode=mode,
+                            file_size_bytes=written,
+                            game_stats_id=existing_platform_match.id,
+                            played_on=played_on,
+                        )
+                        await db.commit()
+                        return {
+                            "message": "Reviewed match refreshed with later final replay data.",
+                            "replay_hash": replay_hash,
+                            "platform_match_id": platform_match_id,
+                            "uploader_uid": uploader_uid,
+                            "upload_mode": mode,
+                            "parse_iteration": parse_iteration,
+                            "is_final": True,
+                        }
+
                     await _record_parse_attempt(
                         db,
                         user_uid=uploader_uid,

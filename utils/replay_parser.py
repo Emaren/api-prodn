@@ -265,6 +265,30 @@ def _extract_chat_preview(chat):
     return [entry for entry in preview if _has_meaningful_value(entry)]
 
 
+def _max_game_chat_timestamp_seconds(key_events):
+    if not isinstance(key_events, dict):
+        return None
+
+    preview = key_events.get("chat_preview")
+    if not isinstance(preview, list):
+        return None
+
+    max_seconds = 0
+    for entry in preview:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("origination") or "").strip().lower() != "game":
+            continue
+        timestamp = entry.get("timestamp_seconds")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            continue
+        numeric = int(timestamp)
+        if numeric > max_seconds:
+            max_seconds = numeric
+
+    return max_seconds or None
+
+
 def _apply_hd_early_exit_rules(stats):
     if str(stats.get("game_version") or "").strip() != "Version.HD":
         return stats
@@ -274,6 +298,14 @@ def _apply_hd_early_exit_rules(stats):
         return stats
 
     key_events = stats.get("key_events") if isinstance(stats.get("key_events"), dict) else {}
+    max_game_chat_seconds = _max_game_chat_timestamp_seconds(key_events)
+    if isinstance(max_game_chat_seconds, int) and max_game_chat_seconds >= 60:
+        stats["duration"] = max(duration_seconds, max_game_chat_seconds)
+        key_events["duration_source"] = "chat_preview_seconds_override"
+        key_events["duration_override_seconds"] = stats["duration"]
+        stats["key_events"] = key_events
+        return stats
+
     resigned_player_numbers = key_events.get("resigned_player_numbers")
     has_resign = isinstance(resigned_player_numbers, list) and len(resigned_player_numbers) > 0
     is_rated = bool(key_events.get("rated"))

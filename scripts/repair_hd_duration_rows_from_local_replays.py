@@ -12,6 +12,7 @@ if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
 from utils.replay_parser import _parse_sync_bytes  # noqa: E402
+from utils.extract_datetime import extract_datetime_from_filename  # noqa: E402
 
 
 EARLY_EXIT_PARSE_REASON = "hd_early_exit_under_60s"
@@ -42,6 +43,30 @@ def derived_parse_reason(row_parse_source, parsed_parse_reason):
 
 def norm_name(value):
     return str(value or "").strip().lower()
+
+
+def max_game_chat_timestamp_seconds(key_events):
+    if not isinstance(key_events, dict):
+        return 0
+
+    preview = key_events.get("chat_preview")
+    if not isinstance(preview, list):
+        return 0
+
+    max_seconds = 0
+    for entry in preview:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("origination") or "").strip().lower() != "game":
+            continue
+        timestamp = entry.get("timestamp_seconds")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            continue
+        numeric = int(timestamp)
+        if numeric > max_seconds:
+            max_seconds = numeric
+
+    return max_seconds
 
 
 def match_uploader_player(players, row_user):
@@ -127,6 +152,63 @@ def infer_incomplete_uploader_outcome(snapshot, row_user):
     next_snapshot["parse_reason"] = "watcher_inferred_opponent_win_on_incomplete_1v1"
     next_snapshot["key_events"] = next_key_events
     return next_snapshot
+
+
+def repair_inconsistent_early_exit_snapshot(snapshot, original_filename):
+    if snapshot.get("parse_reason") != EARLY_EXIT_PARSE_REASON:
+        return snapshot
+
+    key_events = snapshot.get("key_events") if isinstance(snapshot.get("key_events"), dict) else {}
+    suppressed_winner = str(key_events.get("suppressed_winner") or "").strip()
+    max_chat_seconds = max_game_chat_timestamp_seconds(key_events)
+    if not suppressed_winner or max_chat_seconds < 60:
+        return snapshot
+
+    players = snapshot.get("players") if isinstance(snapshot.get("players"), list) else []
+    patched_players = []
+    matched_winner = False
+    for player in players:
+        updated = dict(player)
+        player_name = str(updated.get("name") or "").strip()
+        if norm_name(player_name) == norm_name(suppressed_winner):
+            updated["winner"] = True
+            matched_winner = True
+        elif player_name:
+            updated["winner"] = False
+        patched_players.append(updated)
+
+    next_key_events = dict(key_events)
+    next_key_events.pop("no_rated_result", None)
+    next_key_events.pop("early_exit_under_60s", None)
+    next_key_events.pop("early_exit_seconds", None)
+    next_key_events["completed"] = False
+    next_key_events["disconnect_detected"] = True
+    next_key_events["duration_source"] = "chat_preview_seconds_override"
+    next_key_events["duration_override_seconds"] = max_chat_seconds
+    next_key_events["winner_inference"] = {
+        "type": "legacy_in_game_chat_duration_override",
+        "suppressed_winner": suppressed_winner,
+        "max_game_chat_seconds": max_chat_seconds,
+    }
+
+    played_on = snapshot.get("played_on")
+    if not played_on and original_filename:
+        dt = extract_datetime_from_filename(original_filename)
+        played_on = iso_or_none(dt.isoformat() if dt else None)
+
+    return {
+        **snapshot,
+        "duration": max(int(snapshot.get("duration") or 0), max_chat_seconds),
+        "game_duration": max(int(snapshot.get("game_duration") or 0), max_chat_seconds),
+        "winner": suppressed_winner,
+        "players": patched_players if matched_winner else players,
+        "disconnect_detected": True,
+        "parse_reason": "watcher_inferred_opponent_win_on_incomplete_1v1"
+        if matched_winner and len(players) == 2
+        else "watcher_inferred_backfill",
+        "key_events": next_key_events,
+        "played_on": played_on,
+    }
 
 
 def build_row_snapshot(row):
@@ -283,6 +365,14 @@ def main():
               and coalesce(game_stats.user_uid, '') <> ''
               and game_stats.user_uid <> 'system'
             )
+            or exists (
+              select 1
+              from game_stats later_live
+              where later_live.is_final = false
+                and later_live.original_filename = game_stats.original_filename
+                and later_live.created_at > game_stats.created_at
+                and coalesce(later_live.duration, 0) >= coalesce(game_stats.duration, 0) + 60
+            )
           )
         order by game_stats.id
     """
@@ -298,19 +388,20 @@ def main():
                 if filename_filter and original_filename not in filename_filter:
                     continue
 
-                replay_path = replay_dir / original_filename
-                if not replay_path.exists():
-                    continue
-
                 checked += 1
-                parsed = _parse_sync_bytes(str(replay_path), replay_path.read_bytes())
-                if not parsed:
-                    continue
-
                 current_snapshot = build_row_snapshot(row)
                 row_user = build_row_user(row)
-                next_snapshot = build_parsed_snapshot(row[12], parsed)
-                next_snapshot = infer_incomplete_uploader_outcome(next_snapshot, row_user)
+                replay_path = replay_dir / original_filename
+
+                if replay_path.exists():
+                    parsed = _parse_sync_bytes(str(replay_path), replay_path.read_bytes())
+                    if not parsed:
+                        continue
+                    next_snapshot = build_parsed_snapshot(row[12], parsed)
+                    next_snapshot = infer_incomplete_uploader_outcome(next_snapshot, row_user)
+                else:
+                    next_snapshot = repair_inconsistent_early_exit_snapshot(current_snapshot, original_filename)
+
                 if not snapshots_differ(current_snapshot, next_snapshot):
                     continue
 

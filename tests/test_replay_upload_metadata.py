@@ -10,6 +10,7 @@ from routes.replay_routes_async import (
     _infer_incomplete_uploader_outcome,
     _parse_bool_header,
     _parse_positive_int_header,
+    _should_refresh_reviewed_match,
 )
 
 
@@ -112,3 +113,29 @@ def test_infer_incomplete_uploader_outcome_skips_under_60_no_result():
     }
 
     assert _infer_incomplete_uploader_outcome(parsed, user, None) is None
+
+
+def test_should_refresh_reviewed_match_when_later_final_is_much_longer():
+    existing_game = SimpleNamespace(
+        duration=256,
+        key_events={"chat_count": 2},
+    )
+
+    assert _should_refresh_reviewed_match(
+        existing_game,
+        3288,
+        {"chat_count": 2},
+    )
+
+
+def test_should_not_refresh_reviewed_match_for_small_progress_bump():
+    existing_game = SimpleNamespace(
+        duration=1200,
+        key_events={"chat_count": 6},
+    )
+
+    assert not _should_refresh_reviewed_match(
+        existing_game,
+        1220,
+        {"chat_count": 6},
+    )

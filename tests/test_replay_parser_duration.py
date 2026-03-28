@@ -39,3 +39,41 @@ def test_apply_hd_early_exit_rules_suppresses_under_60s_rated_result():
     assert patched["key_events"]["no_rated_result"] is True
     assert patched["key_events"]["suppressed_winner"] == "Emaren"
     assert all(player["winner"] is None for player in patched["players"])
+
+
+def test_apply_hd_early_exit_rules_skips_false_under_60_when_game_chat_runs_long():
+    stats = {
+        "game_version": "Version.HD",
+        "duration": 8,
+        "winner": "Julio Alvarez",
+        "completed": True,
+        "disconnect_detected": False,
+        "players": [
+            {"name": "Roger", "winner": False},
+            {"name": "Julio Alvarez", "winner": True},
+        ],
+        "key_events": {
+            "rated": True,
+            "completed": True,
+            "resigned_player_numbers": [1],
+            "chat_preview": [
+                {
+                    "origination": "game",
+                    "timestamp_seconds": 1249,
+                    "message": "9",
+                },
+                {
+                    "origination": "game",
+                    "timestamp_seconds": 6781,
+                    "message": "gg",
+                },
+            ],
+        },
+    }
+
+    patched = _apply_hd_early_exit_rules(stats)
+
+    assert patched["winner"] == "Julio Alvarez"
+    assert patched["duration"] == 6781
+    assert patched["key_events"]["duration_source"] == "chat_preview_seconds_override"
+    assert "parse_reason" not in patched
