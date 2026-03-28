@@ -9,10 +9,9 @@ from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 
-from config import load_config, get_api_targets
+from config import load_config
 from parse_replay import parse_and_send
 from utils.replay_parser import parse_replay_full
-from utils.extract_datetime import extract_datetime_from_filename
 
 # ───────────────────────────────────────────────
 # 🔧 Config
@@ -23,6 +22,8 @@ USE_POLLING = config.get("use_polling", True)
 POLL_INTERVAL = config.get("polling_interval", 1)
 PARSE_INTERVAL = config.get("parse_interval", 15)
 STABLE_TIME = config.get("stable_time_seconds", 60)
+INITIAL_LIVE_DELAY = config.get("initial_live_delay_seconds", 3)
+LIVE_PARSE_COOLDOWN = config.get("live_parse_cooldown_seconds", max(PARSE_INTERVAL * 3, 45))
 MIN_SIZE = 1
 
 logging.basicConfig(
@@ -65,65 +66,85 @@ def parse(path, iteration, is_final=False):
     try:
         if os.path.getsize(path) < MIN_SIZE:
             logging.debug(f"⏳ Skipping tiny file: {path}")
-            return
-        asyncio.run(parse_and_send(path, force=False, parse_iteration=iteration, is_final=is_final))
-        if is_final:
+            return False
+        sent = asyncio.run(parse_and_send(path, force=False, parse_iteration=iteration, is_final=is_final))
+        if sent and is_final:
             summarize_parse(path)
+        return sent
     except Exception as e:
         logging.error(f"❌ Parse failed: {e}", exc_info=True)
+        return False
 
-def wait_for_stability(path, delay=STABLE_TIME, poll=3):
-    last_size, stable = -1, 0
-    while True:
-        try:
-            size = os.path.getsize(path)
-        except FileNotFoundError:
-            logging.warning(f"🛑 File gone: {path}")
+def wait_for_first_bytes(path, timeout=30, poll=1):
+    started_at = time.time()
+    while time.time() - started_at <= timeout:
+        if not os.path.exists(path):
+            logging.warning(f"🛑 File gone before first parse: {path}")
             return False
-        if size == last_size:
-            stable += poll
-        else:
-            last_size = size
-            stable = 0
-        if stable >= delay:
-            return True
+
+        try:
+            if os.path.getsize(path) >= MIN_SIZE:
+                return True
+        except FileNotFoundError:
+            logging.warning(f"🛑 File gone before first parse: {path}")
+            return False
+
         time.sleep(poll)
+
+    logging.warning(f"⚠️ Replay never reached minimum size: {path}")
+    return False
 
 def watch_replay(path):
     logging.info(f"🎬 Watching: {path}")
-    if not wait_for_stability(path):
-        logging.warning(f"⚠️ Never stabilized: {path}")
-        return
-
-    last_hash, last_time = None, 0
-    iteration, stable_count = 0, 0
-    max_stable = 4
-    cooldown = 120
-
-    while True:
-        if not os.path.exists(path):
-            logging.info(f"🗑️ Replay removed: {path}")
+    try:
+        if not wait_for_first_bytes(path):
             return
 
-        now = time.time()
-        h = sha1_of_file(path)
+        if INITIAL_LIVE_DELAY > 0:
+            time.sleep(INITIAL_LIVE_DELAY)
 
-        if h and h != last_hash and (now - last_time >= cooldown):
-            last_hash, last_time = h, now
-            iteration += 1
-            stable_count = 0
-            logging.debug(f"🚀 Parsing iter {iteration}: {path}")
-            parse(path, iteration, is_final=False)
-        else:
-            stable_count += 1
-            logging.debug(f"⏸ Waiting... {stable_count}/{max_stable}")
+        last_hash = None
+        last_parse_at = 0.0
+        last_change_at = time.time()
+        iteration = 0
 
-        if stable_count >= max_stable:
-            logging.info(f"🏁 Final parse for: {path}")
-            parse(path, iteration + 1, is_final=True)
-            break
+        while True:
+            if not os.path.exists(path):
+                logging.info(f"🗑️ Replay removed: {path}")
+                return
 
-        time.sleep(PARSE_INTERVAL)
+            now = time.time()
+            replay_hash = sha1_of_file(path)
+
+            if replay_hash and replay_hash != last_hash:
+                last_hash = replay_hash
+                last_change_at = now
+
+                if iteration == 0 or now - last_parse_at >= LIVE_PARSE_COOLDOWN:
+                    next_iteration = iteration + 1
+                    logging.debug(f"🚀 Live parse iter {next_iteration}: {path}")
+                    if parse(path, next_iteration, is_final=False):
+                        iteration = next_iteration
+                        last_parse_at = now
+                    else:
+                        logging.debug(f"⚠️ Live parse attempt did not store yet: {path}")
+                else:
+                    cooldown_remaining = max(0, LIVE_PARSE_COOLDOWN - (now - last_parse_at))
+                    logging.debug(
+                        f"⏳ Replay still changing, waiting {cooldown_remaining:.0f}s before next live parse: {path}"
+                    )
+            elif iteration > 0 and now - last_change_at >= STABLE_TIME:
+                logging.info(f"🏁 Final parse for: {path}")
+                parse(path, iteration + 1, is_final=True)
+                break
+            else:
+                idle_for = max(0, now - last_change_at)
+                logging.debug(f"⏸ Waiting for more replay bytes ({idle_for:.0f}s idle): {path}")
+
+            time.sleep(PARSE_INTERVAL)
+    finally:
+        with LOCK:
+            ACTIVE.pop(path, None)
 
 # ───────────────────────────────────────────────
 # 👀 Watcher Handler

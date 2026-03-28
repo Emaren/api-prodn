@@ -37,21 +37,36 @@ ENDPOINTS = {
 # ───────────────────────────────────────────────
 # 🧠 Core
 # ───────────────────────────────────────────────
-async def parse_and_send(replay_path: str, force: bool = False, parse_iteration: int = 1, is_final: bool = True):
+async def parse_and_send(
+    replay_path: str,
+    force: bool = False,
+    parse_iteration: int = 1,
+    is_final: bool = True,
+    parse_source: str | None = None,
+    parse_reason: str | None = None,
+    original_filename: str | None = None,
+):
     if not os.path.exists(replay_path):
         logging.error(f"❌ Replay not found: {replay_path}")
-        return
+        return False
 
     logging.info(f"📄 Parsing replay: {replay_path}")
     parsed = await parse_replay_full(replay_path)
     if not parsed:
         logging.warning(f"⚠️ Failed to parse: {replay_path}")
-        return
+        return False
 
-    parsed["played_on"] = extract_datetime_from_filename(os.path.basename(replay_path)).isoformat() if extract_datetime_from_filename(os.path.basename(replay_path)) else None
+    replay_name = original_filename or os.path.basename(replay_path)
+    played_on = extract_datetime_from_filename(replay_name)
+    parsed["played_on"] = played_on.isoformat() if played_on else None
     parsed["replay_file"] = replay_path
+    parsed["original_filename"] = replay_name
     parsed["parse_iteration"] = parse_iteration
     parsed["is_final"] = is_final
+    parsed["parse_source"] = parse_source or ("watcher_final" if is_final else "watcher_live")
+    parsed["parse_reason"] = parse_reason or (
+        "watcher_final_submission" if is_final else "watcher_live_iteration"
+    )
     parsed["replay_hash"] = await hash_replay_file(replay_path)
     parsed["game_duration"] = parsed.get("duration") or parsed.get("header", {}).get("duration") or None
 
@@ -61,6 +76,8 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
             json.dump(parsed, f, indent=2)
     except Exception as e:
         logging.warning(f"❌ Could not save .json: {e}")
+
+    sent_successfully = False
 
     for target in api_targets:
         url = ENDPOINTS.get(target) or target
@@ -101,6 +118,7 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
             response = requests.post(full_url, json=parsed, headers=headers, timeout=60)
 
             if response.ok:
+                sent_successfully = True
                 logging.info(f"✅ [{target}] Response: {response.status_code} - {response.text}")
             elif response.status_code in {404, 405} and is_final:
                 fallback_url = full_url.replace("/api/parse_replay", "/api/replay/upload")
@@ -118,6 +136,7 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
                         timeout=90,
                     )
                 if fallback.ok:
+                    sent_successfully = True
                     logging.info(
                         f"✅ [{target}] File-upload fallback succeeded: {fallback.status_code} - {fallback.text}"
                     )
@@ -129,6 +148,8 @@ async def parse_and_send(replay_path: str, force: bool = False, parse_iteration:
                 logging.error(f"❌ [{target}] Error: {response.status_code} - {response.text}")
         except Exception as exc:
             logging.error(f"❌ [{target}] API failed: {exc}")
+
+    return sent_successfully
 
 # ───────────────────────────────────────────────
 # 🧪 Entrypoint
