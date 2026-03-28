@@ -3,6 +3,7 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.future import select
+import json
 import logging
 import os
 import time
@@ -27,6 +28,32 @@ from routes import (
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("aoe2hdbets.api")
+
+
+def _read_platform_match_id(game: GameStats) -> str | None:
+    try:
+        key_events = json.loads(game.key_events) if isinstance(game.key_events, str) else (game.key_events or {})
+    except Exception:
+        key_events = {}
+
+    if not isinstance(key_events, dict):
+        return None
+
+    value = key_events.get("platform_match_id")
+    if not isinstance(value, str):
+        return None
+
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _game_identity_key(game: GameStats) -> str:
+    platform_match_id = _read_platform_match_id(game)
+    if platform_match_id:
+        return f"platform:{platform_match_id}"
+    if getattr(game, "replay_hash", None):
+        return f"hash:{game.replay_hash}"
+    return f"id:{game.id}"
 
 
 def _parse_allowed_origins() -> list[str]:
@@ -121,8 +148,9 @@ async def get_game_stats(db_gen=Depends(get_db)):
 
             unique_games = {}
             for game in games:
-                if game.replay_hash not in unique_games:
-                    unique_games[game.replay_hash] = game
+                identity_key = _game_identity_key(game)
+                if identity_key not in unique_games:
+                    unique_games[identity_key] = game
 
             logging.getLogger(__name__).info(
                 f"📊 Returning {len(unique_games)} unique games from DB"

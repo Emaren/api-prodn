@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import base64
 import re
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 # Prefer full model set if present (User/ApiKey added in recent migration)
 try:
@@ -80,6 +80,18 @@ def _safe_iso_datetime(value: str | None):
 def _clean_detail(value: str | None, fallback: str | None = None):
     cleaned = " ".join((value or fallback or "").split()).strip()
     return cleaned[:255] if cleaned else None
+
+
+def _extract_platform_match_id(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+
+    candidate = value.get("platform_match_id")
+    if not isinstance(candidate, str):
+        return None
+
+    cleaned = candidate.strip()
+    return cleaned or None
 
 
 def _parse_bool_header(value: Optional[str], default: bool) -> bool:
@@ -301,6 +313,20 @@ async def _record_parse_attempt(
     )
 
 
+async def _load_existing_final_by_platform_match_id(db, platform_match_id: Optional[str]):
+    if not platform_match_id:
+        return None
+
+    result = await db.execute(
+        select(GameStats)
+        .where(GameStats.is_final.is_(True))
+        .where(text("key_events->>'platform_match_id' = :platform_match_id"))
+        .params(platform_match_id=platform_match_id)
+        .order_by(GameStats.created_at.asc(), GameStats.id.asc())
+    )
+    return result.scalars().first()
+
+
 def _match_uploader_player(players: list, user, claimed_name: Optional[str]):
     steam_id = str(getattr(user, "steam_id", "") or "").strip()
     if steam_id:
@@ -454,6 +480,19 @@ async def parse_new_replay(
             if existing.scalars().first():
                 logging.info(f"🛡️ Skipped duplicate final replay: {data.replay_hash}")
                 return {"message": "Replay already parsed as final. Skipped."}
+
+            platform_match_id = _extract_platform_match_id(data.key_events)
+            existing_platform_match = await _load_existing_final_by_platform_match_id(
+                db,
+                platform_match_id,
+            )
+            if existing_platform_match and existing_platform_match.replay_hash != data.replay_hash:
+                logging.info(
+                    "🛡️ Skipped reviewed platform match duplicate: %s (%s)",
+                    platform_match_id,
+                    data.replay_hash,
+                )
+                return {"message": "Reviewed match already stored. Skipped."}
 
         game = GameStats(
             user_uid=user_uid,
@@ -618,6 +657,35 @@ async def upload_replay_file(
                     "uploader_uid": uploader_uid,
                     "upload_mode": mode,
                 }
+
+            platform_match_id = _extract_platform_match_id(key_events)
+            if is_final_upload:
+                existing_platform_match = await _load_existing_final_by_platform_match_id(
+                    db,
+                    platform_match_id,
+                )
+                if existing_platform_match and existing_platform_match.replay_hash != replay_hash:
+                    await _record_parse_attempt(
+                        db,
+                        user_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_filename=original_name,
+                        parse_source=parse_source,
+                        status="duplicate_reviewed_match",
+                        detail="Reviewed match already stored. Skipped.",
+                        upload_mode=mode,
+                        file_size_bytes=written,
+                        game_stats_id=existing_platform_match.id,
+                        played_on=played_on,
+                    )
+                    await db.commit()
+                    return {
+                        "message": "Reviewed match already stored. Skipped.",
+                        "replay_hash": replay_hash,
+                        "platform_match_id": platform_match_id,
+                        "uploader_uid": uploader_uid,
+                        "upload_mode": mode,
+                    }
 
             if not is_final_upload:
                 existing_live = await db.execute(

@@ -13,6 +13,7 @@ from db.models import GameStats  # noqa: E402
 
 
 EARLY_EXIT_PARSE_REASON = "hd_early_exit_under_60s"
+MIN_CONFIDENT_MILLISECONDS_DURATION = 60_000
 
 
 def normalize_duration_seconds(raw_value):
@@ -33,8 +34,17 @@ def should_normalize_duration(row):
     if row.parse_source not in {"file_upload", "json_parse"}:
         return False
 
-    raw_duration = row.duration or row.game_duration or 0
-    return isinstance(raw_duration, int) and raw_duration >= 480
+    key_events = dict(row.key_events or {})
+    duration_source = str(key_events.get("duration_source") or "").strip()
+    if duration_source == "mgz_summary_ms_normalized":
+        return False
+
+    raw_duration = key_events.get("raw_duration_ms")
+    if isinstance(raw_duration, (int, float)) and raw_duration >= 480:
+        return True
+
+    duration_value = row.duration or row.game_duration or 0
+    return isinstance(duration_value, int) and duration_value >= MIN_CONFIDENT_MILLISECONDS_DURATION
 
 
 def mark_early_exit_if_needed(row, normalized_seconds):

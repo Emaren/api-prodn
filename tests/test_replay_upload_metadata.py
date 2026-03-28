@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from routes.replay_routes_async import (
     _derive_upload_parse_metadata,
+    _extract_platform_match_id,
     _parse_bool_header,
     _parse_positive_int_header,
 )
@@ -49,3 +50,10 @@ def test_derive_upload_parse_metadata_preserves_parser_reason_when_specific():
 
     assert parse_source == "watcher_final"
     assert parse_reason == "hd_early_exit_under_60s"
+
+
+def test_extract_platform_match_id_trims_valid_values():
+    assert _extract_platform_match_id({"platform_match_id": "  abc-123  "}) == "abc-123"
+    assert _extract_platform_match_id({"platform_match_id": ""}) is None
+    assert _extract_platform_match_id({"platform_match_id": None}) is None
+    assert _extract_platform_match_id([]) is None
