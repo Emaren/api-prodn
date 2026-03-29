@@ -30,6 +30,7 @@ router = APIRouter(prefix="/api", tags=["replay"])
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")  # optional; if set, enforces auth for uploads
 MAX_REPLAY_UPLOAD_BYTES = int(os.getenv("MAX_REPLAY_UPLOAD_BYTES", str(250 * 1024 * 1024)))
 SUPERSEDED_PARSE_REASON = "superseded_by_later_upload"
+PLACEHOLDER_LIVE_PARSE_REASON = "watcher_live_pending_parse"
 
 WATCHER_KEY_RE = re.compile(r"^wolo_([a-f0-9]{12})_(.+)$", re.IGNORECASE)
 
@@ -317,6 +318,74 @@ async def _record_parse_attempt(
             played_on=played_on,
         )
     )
+
+
+def _is_placeholder_live_game(game) -> bool:
+    return bool(game) and not bool(getattr(game, "is_final", False)) and getattr(
+        game, "parse_reason", None
+    ) == PLACEHOLDER_LIVE_PARSE_REASON
+
+
+async def _load_existing_placeholder_live_game(
+    db,
+    uploader_uid: Optional[str],
+    original_filename: Optional[str],
+):
+    if not original_filename:
+        return None
+
+    result = await db.execute(
+        select(GameStats)
+        .where(GameStats.user_uid == (uploader_uid or "system"))
+        .where(GameStats.original_filename == original_filename)
+        .where(GameStats.is_final.is_(False))
+        .where(GameStats.parse_reason == PLACEHOLDER_LIVE_PARSE_REASON)
+        .order_by(GameStats.id.desc())
+    )
+    return result.scalars().first()
+
+
+def _apply_parsed_upload_to_game(
+    game,
+    *,
+    uploader_uid: Optional[str],
+    replay_hash: str,
+    original_name: str,
+    parsed: dict,
+    map_payload: dict,
+    duration: int,
+    winner: str,
+    players: list,
+    event_types: list,
+    key_events: dict,
+    parse_iteration: int,
+    is_final_upload: bool,
+    disconnect_detected: bool,
+    parse_source: str,
+    parse_reason: str,
+    played_on,
+):
+    game.user_uid = uploader_uid or "system"
+    game.replay_file = original_name
+    game.replay_hash = replay_hash
+    game.game_version = parsed.get("game_version")
+    game.map = map_payload
+    game.game_type = parsed.get("game_type")
+    game.duration = duration
+    game.game_duration = duration
+    game.winner = winner
+    game.players = players
+    game.event_types = event_types
+    game.key_events = key_events
+    game.parse_iteration = parse_iteration
+    game.is_final = is_final_upload
+    game.disconnect_detected = disconnect_detected
+    game.parse_source = parse_source
+    game.parse_reason = parse_reason
+    game.original_filename = original_name
+    game.timestamp = datetime.utcnow()
+    if played_on is not None:
+        game.played_on = played_on
 
 
 async def _load_existing_final_by_platform_match_id(db, platform_match_id: Optional[str]):
@@ -791,6 +860,77 @@ async def upload_replay_file(
                 apply_hd_early_exit_rules=is_final_upload,
             )
             if not parsed:
+                if not is_final_upload and mode == "watcher":
+                    placeholder_key_events = {
+                        "completed": False,
+                        "live_pending_parse": True,
+                    }
+                    existing_placeholder_live = await _load_existing_placeholder_live_game(
+                        db,
+                        uploader_uid,
+                        original_name,
+                    )
+
+                    if existing_placeholder_live:
+                        existing_placeholder_live.user_uid = uploader_uid or existing_placeholder_live.user_uid
+                        existing_placeholder_live.replay_file = original_name
+                        existing_placeholder_live.replay_hash = replay_hash
+                        existing_placeholder_live.parse_iteration = parse_iteration
+                        existing_placeholder_live.is_final = False
+                        existing_placeholder_live.disconnect_detected = False
+                        existing_placeholder_live.parse_source = parse_source_hint
+                        existing_placeholder_live.parse_reason = PLACEHOLDER_LIVE_PARSE_REASON
+                        existing_placeholder_live.original_filename = original_name
+                        existing_placeholder_live.key_events = placeholder_key_events
+                        existing_placeholder_live.timestamp = datetime.utcnow()
+                    else:
+                        existing_placeholder_live = GameStats(
+                            user_uid=uploader_uid or "system",
+                            replay_file=original_name,
+                            replay_hash=replay_hash,
+                            game_version=None,
+                            map={"name": "Unknown", "size": "Unknown"},
+                            game_type=None,
+                            duration=0,
+                            game_duration=0,
+                            winner="Unknown",
+                            players=[],
+                            event_types=[],
+                            key_events=placeholder_key_events,
+                            parse_iteration=parse_iteration,
+                            is_final=False,
+                            disconnect_detected=False,
+                            parse_source=parse_source_hint,
+                            parse_reason=PLACEHOLDER_LIVE_PARSE_REASON,
+                            original_filename=original_name,
+                            played_on=None,
+                        )
+                        db.add(existing_placeholder_live)
+                        await db.flush()
+
+                    await _record_parse_attempt(
+                        db,
+                        user_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_filename=original_name,
+                        parse_source=parse_source_hint,
+                        status="live_pending_parse",
+                        detail="Replay detected early; stored placeholder live session until parseable.",
+                        upload_mode=mode,
+                        file_size_bytes=written,
+                        game_stats_id=existing_placeholder_live.id,
+                    )
+                    await db.commit()
+                    return {
+                        "message": "Replay detected early; placeholder live session stored.",
+                        "replay_hash": replay_hash,
+                        "uploader_uid": uploader_uid,
+                        "upload_mode": mode,
+                        "parse_iteration": parse_iteration,
+                        "is_final": False,
+                        "pending_parse": True,
+                    }
+
                 await _record_parse_attempt(
                     db,
                     user_uid=uploader_uid,
@@ -860,6 +1000,57 @@ async def upload_replay_file(
                 )
                 await db.commit()
                 raise HTTPException(status_code=422, detail=parse_failure_detail)
+
+            if not is_final_upload:
+                existing_placeholder_live = await _load_existing_placeholder_live_game(
+                    db,
+                    uploader_uid,
+                    original_name,
+                )
+                if existing_placeholder_live:
+                    _apply_parsed_upload_to_game(
+                        existing_placeholder_live,
+                        uploader_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_name=original_name,
+                        parsed=parsed,
+                        map_payload=map_payload,
+                        duration=duration,
+                        winner=winner,
+                        players=players,
+                        event_types=event_types,
+                        key_events=key_events,
+                        parse_iteration=parse_iteration,
+                        is_final_upload=False,
+                        disconnect_detected=disconnect_detected,
+                        parse_source=parse_source,
+                        parse_reason=parse_reason,
+                        played_on=played_on,
+                    )
+                    await _record_parse_attempt(
+                        db,
+                        user_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_filename=original_name,
+                        parse_source=parse_source,
+                        status="live_placeholder_refreshed",
+                        detail=f"Replay iteration {parse_iteration} parsed and replaced placeholder live session.",
+                        upload_mode=mode,
+                        file_size_bytes=written,
+                        game_stats_id=existing_placeholder_live.id,
+                        played_on=played_on,
+                    )
+                    await db.commit()
+                    return {
+                        "message": f"Replay iteration {parse_iteration} parsed and replaced placeholder live session.",
+                        "replay_hash": replay_hash,
+                        "winner": winner,
+                        "players_count": len(players),
+                        "uploader_uid": uploader_uid,
+                        "upload_mode": mode,
+                        "parse_iteration": parse_iteration,
+                        "is_final": False,
+                    }
 
             existing_final = await db.execute(
                 select(GameStats).where(
@@ -1034,6 +1225,51 @@ async def upload_replay_file(
                 )
                 existing_live_game = existing_live.scalars().first()
                 if existing_live_game:
+                    if _is_placeholder_live_game(existing_live_game):
+                        _apply_parsed_upload_to_game(
+                            existing_live_game,
+                            uploader_uid=uploader_uid,
+                            replay_hash=replay_hash,
+                            original_name=original_name,
+                            parsed=parsed,
+                            map_payload=map_payload,
+                            duration=duration,
+                            winner=winner,
+                            players=players,
+                            event_types=event_types,
+                            key_events=key_events,
+                            parse_iteration=parse_iteration,
+                            is_final_upload=False,
+                            disconnect_detected=disconnect_detected,
+                            parse_source=parse_source,
+                            parse_reason=parse_reason,
+                            played_on=played_on,
+                        )
+                        await _record_parse_attempt(
+                            db,
+                            user_uid=uploader_uid,
+                            replay_hash=replay_hash,
+                            original_filename=original_name,
+                            parse_source=parse_source,
+                            status="live_placeholder_refreshed",
+                            detail=f"Replay iteration {parse_iteration} parsed and replaced placeholder live session.",
+                            upload_mode=mode,
+                            file_size_bytes=written,
+                            game_stats_id=existing_live_game.id,
+                            played_on=played_on,
+                        )
+                        await db.commit()
+                        return {
+                            "message": f"Replay iteration {parse_iteration} parsed and replaced placeholder live session.",
+                            "replay_hash": replay_hash,
+                            "winner": winner,
+                            "players_count": len(players),
+                            "uploader_uid": uploader_uid,
+                            "upload_mode": mode,
+                            "parse_iteration": parse_iteration,
+                            "is_final": False,
+                        }
+
                     await _record_parse_attempt(
                         db,
                         user_uid=uploader_uid,
