@@ -129,6 +129,12 @@ def _derive_upload_parse_metadata(
     parse_source = _clean_detail(requested_source)
     parse_reason = _clean_detail(requested_reason)
     parsed_reason_clean = _clean_detail(parsed_reason)
+    generic_requested_reason = parse_reason in {
+        None,
+        "watcher_or_browser",
+        "watcher_final_submission",
+        "watcher_live_iteration",
+    }
 
     if not parse_source:
         if upload_mode == "watcher":
@@ -136,10 +142,10 @@ def _derive_upload_parse_metadata(
         else:
             parse_source = "file_upload"
 
-    if not parse_reason:
-        if parsed_reason_clean and parsed_reason_clean != "watcher_or_browser":
-            parse_reason = parsed_reason_clean
-        elif upload_mode == "watcher":
+    if parsed_reason_clean and parsed_reason_clean != "watcher_or_browser" and generic_requested_reason:
+        parse_reason = parsed_reason_clean
+    elif not parse_reason:
+        if upload_mode == "watcher":
             parse_reason = "watcher_final_submission" if is_final else "watcher_live_iteration"
         else:
             parse_reason = "watcher_or_browser"
@@ -412,6 +418,46 @@ def _infer_incomplete_uploader_outcome(parsed: dict, user, claimed_name: Optiona
     }
 
 
+def _has_reliable_final_signal(parsed: dict, inferred_outcome: Optional[dict] = None):
+    if inferred_outcome:
+        return True
+
+    key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
+    if key_events.get("completed") is True:
+        return True
+    if key_events.get("postgame_available") is True:
+        return True
+    if key_events.get("has_achievements") is True:
+        return True
+    if _coerce_positive_int(key_events.get("player_score_count")) > 0:
+        return True
+
+    winner = parsed.get("winner")
+    if isinstance(winner, str):
+        cleaned_winner = winner.strip()
+        if cleaned_winner and cleaned_winner != "Unknown":
+            return True
+
+    return False
+
+
+def _normalize_live_disconnect_detected(
+    is_final_upload: bool,
+    disconnect_detected: bool,
+    key_events: dict,
+):
+    if is_final_upload:
+        return disconnect_detected
+
+    if not isinstance(key_events, dict):
+        return False
+
+    if key_events.get("completed") is True:
+        return disconnect_detected
+
+    return False
+
+
 def _coerce_positive_int(value):
     if isinstance(value, bool):
         return 0
@@ -433,16 +479,117 @@ def _key_event_chat_count(value):
     return 0
 
 
-def _should_refresh_reviewed_match(existing_game, incoming_duration: int, incoming_key_events: dict):
+def _key_event_bool(value, key: str) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get(key))
+    return False
+
+
+def _key_event_score_count(value) -> int:
+    if isinstance(value, dict):
+        return _coerce_positive_int(value.get("player_score_count"))
+    return 0
+
+
+def _key_event_achievement_count(value) -> int:
+    if isinstance(value, dict):
+        return _coerce_positive_int(value.get("achievement_player_count"))
+    return 0
+
+
+def _event_type_count(value) -> int:
+    if isinstance(value, list):
+        return len([entry for entry in value if entry])
+    return 0
+
+
+def _should_upgrade_duplicate_final(
+    existing_game,
+    incoming_parse_reason: Optional[str],
+    incoming_disconnect_detected: bool,
+    incoming_key_events: dict,
+):
+    existing_key_events = getattr(existing_game, "key_events", {}) or {}
+    existing_parse_reason = getattr(existing_game, "parse_reason", None)
+
+    if incoming_parse_reason == "recorded_resignation_final" and existing_parse_reason != incoming_parse_reason:
+        return True
+
+    incoming_completion_source = (
+        incoming_key_events.get("completion_source") if isinstance(incoming_key_events, dict) else None
+    )
+    existing_completion_source = (
+        existing_key_events.get("completion_source") if isinstance(existing_key_events, dict) else None
+    )
+    if incoming_completion_source and incoming_completion_source != existing_completion_source:
+        return True
+
+    if bool(getattr(existing_game, "disconnect_detected", False)) and not incoming_disconnect_detected:
+        return True
+
+    if _key_event_bool(incoming_key_events, "postgame_available") and not _key_event_bool(
+        existing_key_events, "postgame_available"
+    ):
+        return True
+
+    if _key_event_bool(incoming_key_events, "has_achievements") and not _key_event_bool(
+        existing_key_events, "has_achievements"
+    ):
+        return True
+
+    if _key_event_score_count(incoming_key_events) > _key_event_score_count(existing_key_events):
+        return True
+
+    if _key_event_achievement_count(incoming_key_events) > _key_event_achievement_count(existing_key_events):
+        return True
+
+    incoming_shell_count = _coerce_positive_int(incoming_key_events.get("achievement_shell_count"))
+    existing_shell_count = _coerce_positive_int(existing_key_events.get("achievement_shell_count"))
+    if incoming_shell_count > existing_shell_count:
+        return True
+
+    return False
+
+
+def _should_refresh_reviewed_match(
+    existing_game,
+    incoming_duration: int,
+    incoming_key_events: dict,
+    incoming_players: Optional[list] = None,
+    incoming_event_types: Optional[list] = None,
+):
+    existing_key_events = getattr(existing_game, "key_events", {}) or {}
     existing_duration = _coerce_positive_int(getattr(existing_game, "duration", 0))
     incoming_duration = _coerce_positive_int(incoming_duration)
+    if _key_event_bool(incoming_key_events, "postgame_available") and not _key_event_bool(
+        existing_key_events, "postgame_available"
+    ):
+        return True
+    if _key_event_bool(incoming_key_events, "has_achievements") and not _key_event_bool(
+        existing_key_events, "has_achievements"
+    ):
+        return True
+    if _key_event_bool(incoming_key_events, "completed") and not _key_event_bool(
+        existing_key_events, "completed"
+    ):
+        return True
+    if _key_event_score_count(incoming_key_events) > _key_event_score_count(existing_key_events):
+        return True
+    if _key_event_achievement_count(incoming_key_events) > _key_event_achievement_count(existing_key_events):
+        return True
+
+    incoming_event_count = _event_type_count(incoming_event_types)
+    existing_event_count = _event_type_count(getattr(existing_game, "event_types", []) or [])
+    if incoming_event_count >= existing_event_count + 3 and incoming_duration >= existing_duration:
+        return True
+
     if incoming_duration <= existing_duration:
         return False
 
     if incoming_duration >= existing_duration + 60:
         return True
 
-    existing_chat_count = _key_event_chat_count(getattr(existing_game, "key_events", {}) or {})
+    existing_chat_count = _key_event_chat_count(existing_key_events)
     incoming_chat_count = _key_event_chat_count(incoming_key_events)
     return incoming_chat_count >= existing_chat_count + 3 and incoming_duration >= existing_duration + 30
 
@@ -639,7 +786,10 @@ async def upload_replay_file(
                 parsed_reason=None,
             )
 
-            parsed = await parse_replay_full(temp_path)
+            parsed = await parse_replay_full(
+                temp_path,
+                apply_hd_early_exit_rules=is_final_upload,
+            )
             if not parsed:
                 await _record_parse_attempt(
                     db,
@@ -675,6 +825,11 @@ async def upload_replay_file(
                 requested_reason=x_parse_reason,
                 parsed_reason=parsed.get("parse_reason"),
             )
+            disconnect_detected = _normalize_live_disconnect_detected(
+                is_final_upload,
+                disconnect_detected,
+                key_events,
+            )
 
             inferred_outcome = None
             if is_final_upload:
@@ -690,6 +845,22 @@ async def upload_replay_file(
                 parse_reason = inferred_outcome["parse_reason"]
                 key_events = inferred_outcome["key_events"]
 
+            if is_final_upload and not _has_reliable_final_signal(parsed, inferred_outcome):
+                await _record_parse_attempt(
+                    db,
+                    user_uid=uploader_uid,
+                    replay_hash=replay_hash,
+                    original_filename=original_name,
+                    parse_source=parse_source,
+                    status="final_not_ready",
+                    detail=parse_failure_detail,
+                    upload_mode=mode,
+                    file_size_bytes=written,
+                    played_on=played_on,
+                )
+                await db.commit()
+                raise HTTPException(status_code=422, detail=parse_failure_detail)
+
             existing_final = await db.execute(
                 select(GameStats).where(
                     GameStats.replay_hash == replay_hash,
@@ -698,6 +869,55 @@ async def upload_replay_file(
             )
             existing_final_game = existing_final.scalars().first()
             if existing_final_game:
+                if is_final_upload and _should_upgrade_duplicate_final(
+                    existing_final_game,
+                    parse_reason,
+                    disconnect_detected,
+                    key_events,
+                ):
+                    existing_final_game.user_uid = uploader_uid or existing_final_game.user_uid
+                    existing_final_game.replay_file = original_name
+                    existing_final_game.game_version = parsed.get("game_version")
+                    existing_final_game.map = map_payload
+                    existing_final_game.game_type = parsed.get("game_type")
+                    existing_final_game.duration = duration
+                    existing_final_game.game_duration = duration
+                    existing_final_game.winner = winner
+                    existing_final_game.players = players
+                    existing_final_game.event_types = event_types
+                    existing_final_game.key_events = key_events
+                    existing_final_game.parse_iteration = parse_iteration
+                    existing_final_game.disconnect_detected = disconnect_detected
+                    existing_final_game.parse_source = parse_source
+                    existing_final_game.parse_reason = parse_reason
+                    existing_final_game.original_filename = original_name
+                    existing_final_game.timestamp = datetime.utcnow()
+                    if played_on is not None:
+                        existing_final_game.played_on = played_on
+
+                    await _record_parse_attempt(
+                        db,
+                        user_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_filename=original_name,
+                        parse_source=parse_source,
+                        status="duplicate_final_refreshed",
+                        detail="Replay final refreshed with clearer completion metadata.",
+                        upload_mode=mode,
+                        file_size_bytes=written,
+                        game_stats_id=existing_final_game.id,
+                        played_on=played_on,
+                    )
+                    await db.commit()
+                    return {
+                        "message": "Replay final refreshed with clearer completion metadata.",
+                        "replay_hash": replay_hash,
+                        "uploader_uid": uploader_uid,
+                        "upload_mode": mode,
+                        "parse_iteration": parse_iteration,
+                        "is_final": True,
+                    }
+
                 await _record_parse_attempt(
                     db,
                     user_uid=uploader_uid,
@@ -726,7 +946,13 @@ async def upload_replay_file(
                     platform_match_id,
                 )
                 if existing_platform_match and existing_platform_match.replay_hash != replay_hash:
-                    if _should_refresh_reviewed_match(existing_platform_match, duration, key_events):
+                    if _should_refresh_reviewed_match(
+                        existing_platform_match,
+                        duration,
+                        key_events,
+                        players,
+                        event_types,
+                    ):
                         existing_platform_match.user_uid = uploader_uid or existing_platform_match.user_uid
                         existing_platform_match.replay_file = original_name
                         existing_platform_match.replay_hash = replay_hash

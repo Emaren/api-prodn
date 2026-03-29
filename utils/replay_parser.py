@@ -47,7 +47,7 @@ CIVILIZATION_NAMES = {
 # ───────────────────────────────────────────────
 # 🔁 Async-compatible wrapper around sync MGZ logic
 # ───────────────────────────────────────────────
-async def parse_replay_full(replay_path):
+async def parse_replay_full(replay_path, apply_hd_early_exit_rules=True):
     if not os.path.exists(replay_path):
         logging.error(f"❌ Replay not found: {replay_path}")
         return None
@@ -57,7 +57,12 @@ async def parse_replay_full(replay_path):
             file_bytes = await f.read()
 
         # Use thread to safely run blocking mgz sync logic
-        return await asyncio.to_thread(_parse_sync_bytes, replay_path, file_bytes)
+        return await asyncio.to_thread(
+            _parse_sync_bytes,
+            replay_path,
+            file_bytes,
+            apply_hd_early_exit_rules,
+        )
 
     except Exception as e:
         logging.error(f"❌ parse error: {e}")
@@ -265,6 +270,49 @@ def _extract_chat_preview(chat):
     return [entry for entry in preview if _has_meaningful_value(entry)]
 
 
+def _count_players_with_visible_scores(players):
+    if not isinstance(players, list):
+        return 0
+
+    count = 0
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        if _normalize_rating(player.get("score")) is not None:
+            count += 1
+
+    return count
+
+
+def _count_players_with_achievements(players):
+    if not isinstance(players, list):
+        return 0
+
+    count = 0
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        if _has_meaningful_value(player.get("achievements")):
+            count += 1
+
+    return count
+
+
+def _count_players_with_achievement_shells(players):
+    if not isinstance(players, list):
+        return 0
+
+    count = 0
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        achievements = player.get("achievements")
+        if isinstance(achievements, dict) and len(achievements) > 0:
+            count += 1
+
+    return count
+
+
 def _max_game_chat_timestamp_seconds(key_events):
     if not isinstance(key_events, dict):
         return None
@@ -287,6 +335,63 @@ def _max_game_chat_timestamp_seconds(key_events):
             max_seconds = numeric
 
     return max_seconds or None
+
+
+def _apply_completion_metadata(stats):
+    key_events = stats.get("key_events") if isinstance(stats.get("key_events"), dict) else {}
+
+    has_scores = bool(key_events.get("has_scores"))
+    has_achievements = bool(key_events.get("has_achievements"))
+    player_score_count = _count_players_with_visible_scores(stats.get("players"))
+    achievement_player_count = _count_players_with_achievements(stats.get("players"))
+    achievement_shell_count = max(
+        _count_players_with_achievement_shells(stats.get("players")),
+        _normalize_rating(key_events.get("achievement_shell_count")) or 0,
+    )
+    postgame_available = bool(key_events.get("postgame_available"))
+    completed = bool(stats.get("completed"))
+    resigned_player_numbers = key_events.get("resigned_player_numbers")
+    has_resignations = isinstance(resigned_player_numbers, list) and len(resigned_player_numbers) > 0
+
+    if postgame_available:
+        completion_source = "postgame"
+    elif has_achievements or has_scores or player_score_count > 0 or achievement_player_count > 0:
+        completion_source = "scoreboard"
+    elif completed and has_resignations:
+        completion_source = "resignation"
+    elif completed:
+        completion_source = "completion_signal"
+    else:
+        completion_source = None
+
+    key_events["has_scores"] = has_scores or player_score_count > 0
+    key_events["has_achievements"] = has_achievements or achievement_player_count > 0
+    key_events["player_score_count"] = player_score_count
+    key_events["achievement_player_count"] = achievement_player_count
+    key_events["achievement_shell_count"] = achievement_shell_count
+    key_events["has_achievement_shell"] = achievement_shell_count > 0
+    key_events["postgame_available"] = postgame_available
+    if completion_source:
+        key_events["completion_source"] = completion_source
+
+    stats["has_scores"] = key_events["has_scores"]
+    stats["has_achievements"] = key_events["has_achievements"]
+    stats["player_score_count"] = player_score_count
+    stats["achievement_player_count"] = achievement_player_count
+    stats["achievement_shell_count"] = achievement_shell_count
+    stats["has_achievement_shell"] = achievement_shell_count > 0
+    stats["postgame_available"] = postgame_available
+    stats["completion_source"] = completion_source
+    stats["key_events"] = key_events
+
+    if (
+        completed
+        and completion_source == "resignation"
+        and not stats.get("parse_reason")
+    ):
+        stats["parse_reason"] = "recorded_resignation_final"
+
+    return stats
 
 
 def _apply_hd_early_exit_rules(stats):
@@ -335,7 +440,13 @@ def _apply_hd_early_exit_rules(stats):
     return stats
 
 
-def _parse_sync_bytes(replay_path, file_bytes):
+def _maybe_apply_hd_early_exit_rules(stats, apply_rules=True):
+    if not apply_rules:
+        return stats
+    return _apply_hd_early_exit_rules(stats)
+
+
+def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
     try:
         h = header.parse(file_bytes)
         s = summary.Summary(io.BytesIO(file_bytes))
@@ -364,12 +475,17 @@ def _parse_sync_bytes(replay_path, file_bytes):
 
         players = []
         winner = None
-        for p in s.get_players():
+        raw_players = list(s.get_players())
+        achievement_shell_count = 0
+        for p in raw_players:
             player_ratings = hd_player_ratings.get(p.get("number")) or {}
             rate_snapshot = _normalize_rating(p.get("rate_snapshot"))
             steam_id = player_ratings.get("steam_id") or _normalize_steam_id(p.get("user_id"))
             civilization = p.get("civilization", "Unknown")
-            achievements = _compact_value(p.get("achievements") or {})
+            raw_achievements = p.get("achievements") or {}
+            if isinstance(raw_achievements, dict) and len(raw_achievements) > 0:
+                achievement_shell_count += 1
+            achievements = _compact_value(raw_achievements)
             p_data = {
                 "name": p.get("name", "Unknown"),
                 "number": _normalize_rating(p.get("number")),
@@ -419,9 +535,17 @@ def _parse_sync_bytes(replay_path, file_bytes):
         stats["players"] = players
         stats["winner"] = winner or "Unknown"
         stats["event_types"] = _extract_event_types(s)
+        visible_score_count = _count_players_with_visible_scores(players)
+        achievement_player_count = _count_players_with_achievements(players)
+        has_achievements = bool(s.has_achievements()) or achievement_player_count > 0
         stats["key_events"] = {
             "completed": completed,
-            "has_achievements": bool(s.has_achievements()),
+            "has_achievements": has_achievements,
+            "has_scores": visible_score_count > 0,
+            "player_score_count": visible_score_count,
+            "achievement_player_count": achievement_player_count,
+            "achievement_shell_count": achievement_shell_count,
+            "has_achievement_shell": achievement_shell_count > 0,
             "postgame_available": s.get_postgame() is not None,
             "owner_player_number": owner_player_number,
             "owner_player_name": owner_player_name,
@@ -446,10 +570,11 @@ def _parse_sync_bytes(replay_path, file_bytes):
             stats["key_events"]["chat_preview"] = chat_preview
         stats["completed"] = completed
         stats["disconnect_detected"] = not completed and len(resigned_player_numbers) == 0
+        stats = _apply_completion_metadata(stats)
 
         dt = extract_datetime_from_filename(os.path.basename(replay_path))
         stats["played_on"] = dt.isoformat() if dt else None
-        stats = _apply_hd_early_exit_rules(stats)
+        stats = _maybe_apply_hd_early_exit_rules(stats, apply_hd_early_exit_rules)
 
         logging.info(f"✅ parse_replay_full => {replay_path}")
         return stats
