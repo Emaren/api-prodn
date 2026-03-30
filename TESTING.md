@@ -64,18 +64,35 @@ Targeted test file:
 pytest tests/<file>.py -q
 ```
 
-## Current testing debt
+## Replay debugging notes
 
-Known current problem:
-- in the default shell session, `pytest` was not found on PATH
+If `ENABLE_TRACE_LOGS=true`, local replay runs may generate:
 
-That means the testing workflow is still too implicit and needs cleanup.
+- `*.trace`
+- `trace.index`
+
+That is expected during active replay debugging and is not, by itself, a failure condition.
+
+Delete those artifacts when you want a cleaner repo snapshot, but leave logging on while building if the visibility is useful.
+
+## What to verify before trusting results
 
 Before trusting a future test pass, verify:
+
 - the active venv
 - installed test dependencies
 - any async pytest plugin requirements
 - replay fixture availability
+- whether trace logging was on during the run
+- whether you were testing live/non-final upload behavior or final settled replay behavior
+
+## Current testing debt
+
+Known current problems:
+
+- in the default shell session, `pytest` was not found on PATH
+- the testing workflow is still too implicit
+- replay upload/live/final regression coverage should be clearer
 
 ## Suggested cleanup next
 
@@ -83,3 +100,7 @@ Before trusting a future test pass, verify:
 2. document one exact passing test command
 3. remove or clearly mark legacy run scripts using old ports
 4. identify which tests are real gatekeepers for replay parsing and upload flows
+5. add or document regression coverage for:
+   - live upload behavior
+   - final replay settlement behavior
+   - parser edge cases on HD replays

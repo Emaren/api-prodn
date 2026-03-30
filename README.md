@@ -8,24 +8,32 @@ Production FastAPI backend for AoE2HDBets.
 
 ## Responsibilities
 
-- Replay ingestion and parsing
+- replay ingestion and parsing
 - `game_stats` persistence in Postgres
-- User/admin endpoints
-- Traffic diagnostics endpoint
+- live/non-final replay handling for watcher uploads
+- user/admin endpoints
+- traffic diagnostics endpoint
 
 ## Key replay routes
 
-- `POST /api/replay/upload`:
-  - Accepts multipart replay file upload
-  - Parses server-side
-  - Stores final replay row in `game_stats`
-  - Supports `x-api-key` when `INTERNAL_API_KEY` is configured
-- `POST /api/parse_replay`:
-  - JSON replay ingestion path (compatible with helper scripts)
-  - Supports `x-api-key` when `INTERNAL_API_KEY` is configured
-- `GET /api/traffic`:
-  - Traffic diagnostics data
-  - Requires admin bearer token (`ADMIN_TOKEN`)
+### `POST /api/replay/upload`
+
+- accepts multipart replay file upload
+- parses server-side
+- stores replay state in `game_stats`
+- supports live/non-final replay iterations
+- supports final replay upload after file settlement
+- supports `x-api-key` when `INTERNAL_API_KEY` is configured
+
+### `POST /api/parse_replay`
+
+- JSON replay ingestion path (compatible with helper scripts)
+- supports `x-api-key` when `INTERNAL_API_KEY` is configured
+
+### `GET /api/traffic`
+
+- traffic diagnostics data
+- requires admin bearer token (`ADMIN_TOKEN`)
 
 ## Local development
 
@@ -55,8 +63,18 @@ Optional/common:
 - `TRAFFIC_STATE_DIR` (default: `runtime/` in repo root)
 - `AOE2_API_BASE_URL` (used by `parse_replay.py` for non-local targets; default `https://api-prodn.aoe2hdbets.com`)
 - `LOG_REQUESTS=true` to enable request-line logging (disabled by default in production)
+- `ENABLE_TRACE_LOGS=true` to emit replay `.trace` files and `trace.index` while debugging replay behavior
 - `ALLOW_UNVERIFIED_BEARER_IDENTITY=true` only for legacy compatibility; keep disabled in production
 - `AUTO_CREATE_TABLES=true` (local-only convenience; default is disabled to avoid schema drift)
+
+## Trace logging notes
+
+When `ENABLE_TRACE_LOGS=true`, the backend may emit local runtime artifacts such as:
+
+- `*.trace`
+- `trace.index`
+
+These are useful while building and debugging replay behavior. They are not deployment assets and can be deleted safely when you want a clean working tree.
 
 ## Migrations
 
@@ -68,12 +86,12 @@ alembic upgrade head
 
 ## Helper scripts
 
-- `watch_replays.py` watches local replay folders and triggers parsing uploads.
-- `parse_replay.py` parses replay files and sends JSON to configured API targets.
+- `watch_replays.py` watches local replay folders and triggers parsing uploads
+- `parse_replay.py` parses replay files and sends JSON to configured API targets
 
 ## Deployment model
 
-- Local MBP -> push `main` -> VPS pull `main` -> restart service.
+Local MBP -> push `main` -> VPS pull `main` -> restart service
 
 ## Production runtime truth
 
@@ -99,3 +117,9 @@ python scripts/set_admin.py --name "<in-game-name>"
 python scripts/set_admin.py --latest
 python scripts/set_admin.py --email you@example.com --unset
 ```
+
+## Current known edges
+
+- replay/live/final behavior is much healthier than earlier, but still worth documenting carefully as it evolves
+- exact postgame achievement-table extraction is still not part of the replay pipeline
+- local trace output is expected while building if trace logging is enabled
