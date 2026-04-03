@@ -93,6 +93,7 @@ Known current problems:
 - in the default shell session, `pytest` was not found on PATH
 - the testing workflow is still too implicit
 - replay upload/live/final regression coverage should be clearer
+- `tests/test_fast.py` skips missing replay fixtures instead of failing hard; current checked-in fixtures only cover `aoc-1.0.mgx`, `aoc-1.0c.mgx`, and `aok-2.0a.mgl`
 
 ## Suggested cleanup next
 
@@ -104,3 +105,4 @@ Known current problems:
    - live upload behavior
    - final replay settlement behavior
    - parser edge cases on HD replays
+6. restore the missing DE/HD replay fixtures used by `tests/test_fast.py`

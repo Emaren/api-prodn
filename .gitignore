@@ -6,6 +6,7 @@
 .env.*
 venv/
 .venv/
+.venv-codex/
 venv-logs/
 venv-freeze*.log
 

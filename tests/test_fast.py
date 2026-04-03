@@ -1,13 +1,26 @@
 import unittest
+from pathlib import Path
+
 from mgz.fast.header import parse
 from mgz.util import Version
+
+RECS_DIR = Path(__file__).resolve().parent / "recs"
+
+
+def parse_fixture_or_skip(fixture_name: str):
+    fixture_path = RECS_DIR / fixture_name
+    if not fixture_path.exists():
+        raise unittest.SkipTest(f"Missing replay fixture: {fixture_path}")
+
+    with fixture_path.open("rb") as handle:
+        return parse(handle)
+
 
 class TestFastUserPatch15(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open('tests/recs/small.mgz', 'rb') as handle:
-            cls.data = parse(handle)
+        cls.data = parse_fixture_or_skip("small.mgz")
 
     def test_version(self):
         self.assertEqual(self.data['version'], Version.USERPATCH15)
@@ -27,8 +40,7 @@ class TestFastDE(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open('tests/recs/de-13.34.aoe2record', 'rb') as handle:
-            cls.data = parse(handle)
+        cls.data = parse_fixture_or_skip("de-13.34.aoe2record")
 
     def test_version(self):
         self.assertEqual(self.data['version'], Version.DE)
@@ -46,8 +58,7 @@ class TestFastDEScenario(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open('tests/recs/de-50.6-scenario.aoe2record', 'rb') as handle:
-            cls.data = parse(handle)
+        cls.data = parse_fixture_or_skip("de-50.6-scenario.aoe2record")
 
     def test_version(self):
         self.assertEqual(self.data['version'], Version.DE)
@@ -61,8 +72,7 @@ class TestFastDEScenarioWithTriggers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open('tests/recs/de-50.6-scenario-with-triggers.aoe2record', 'rb') as handle:
-            cls.data = parse(handle)
+        cls.data = parse_fixture_or_skip("de-50.6-scenario-with-triggers.aoe2record")
 
     def test_version(self):
         self.assertEqual(self.data['version'], Version.DE)
@@ -76,8 +86,7 @@ class TestFastHD(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open('tests/recs/hd-5.8.aoe2record', 'rb') as handle:
-            cls.data = parse(handle)
+        cls.data = parse_fixture_or_skip("hd-5.8.aoe2record")
 
     def test_version(self):
         self.assertEqual(self.data['version'], Version.HD)

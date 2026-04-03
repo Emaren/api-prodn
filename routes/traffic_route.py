@@ -35,6 +35,7 @@ TRAFFIC_SESSION_ACTIVE_GAP_CAP_SECONDS = int(
 )
 TRAFFIC_VISITOR_SESSION_LIMIT = int(os.getenv("TRAFFIC_VISITOR_SESSION_LIMIT", "120"))
 TRAFFIC_VISITOR_PATH_LIMIT = int(os.getenv("TRAFFIC_VISITOR_PATH_LIMIT", "20"))
+TRAFFIC_RESPONSE_CACHE_SECONDS = int(os.getenv("TRAFFIC_RESPONSE_CACHE_SECONDS", "20"))
 
 IP_COUNT_FILE = os.getenv("IP_COUNT_FILE", str(STATE_DIR / "ip_visit_counts.json"))
 IP_TIMESTAMP_FILE = os.getenv("IP_TIMESTAMP_FILE", str(STATE_DIR / "ip_timestamps.json"))
@@ -49,6 +50,10 @@ LEGACY_IP_COUNT_FILE = str(SCRIPT_DIR / "ip_visit_counts.json")
 LEGACY_IP_TIMESTAMP_FILE = str(SCRIPT_DIR / "ip_timestamps.json")
 LEGACY_IP_COUNTRY_FILE = str(SCRIPT_DIR / "ip_country.json")
 LEGACY_SEEN_LINE_HASHES_FILE = str(SCRIPT_DIR / "seen_log_line_hashes.json")
+TRAFFIC_RESPONSE_CACHE = {
+    "expires_at": None,
+    "payload": None,
+}
 
 LEGACY_LOG_LINE_RE = re.compile(
     r'(?P<ip>[0-9a-fA-F:.]+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+'
@@ -246,17 +251,43 @@ def latest_timestamp_string(values):
     return latest.isoformat() if latest else None
 
 
-def get_country(ip):
+def get_cached_traffic_payload(now):
+    expires_at = TRAFFIC_RESPONSE_CACHE.get("expires_at")
+    payload = TRAFFIC_RESPONSE_CACHE.get("payload")
+    if (
+        TRAFFIC_RESPONSE_CACHE_SECONDS > 0
+        and isinstance(expires_at, datetime)
+        and expires_at > now
+        and isinstance(payload, dict)
+    ):
+        return payload
+    return None
+
+
+def cache_traffic_payload(payload, generated_at):
+    if TRAFFIC_RESPONSE_CACHE_SECONDS <= 0:
+        return payload
+
+    TRAFFIC_RESPONSE_CACHE["payload"] = payload
+    TRAFFIC_RESPONSE_CACHE["expires_at"] = generated_at + timedelta(
+        seconds=TRAFFIC_RESPONSE_CACHE_SECONDS
+    )
+    return payload
+
+
+def run_geoiplookup(ip):
     try:
-        output = subprocess.check_output(
+        return subprocess.check_output(
             ["geoiplookup", ip],
             stderr=subprocess.DEVNULL,
             timeout=2,
             text=True,
         ).strip()
     except Exception:
-        return "??"
+        return ""
 
+
+def parse_geoip_country_output(output):
     if not output or "IP Address not found" in output:
         return "??"
 
@@ -267,6 +298,10 @@ def get_country(ip):
 
     fallback = output.split(":", 1)[-1].strip()
     return fallback if fallback else "??"
+
+
+def get_country(ip):
+    return parse_geoip_country_output(run_geoiplookup(ip))
 
 
 def country_name_from_code(code):
@@ -310,19 +345,10 @@ def get_geo_details(ip, geo_cache):
             "city": city,
         }
 
-    country = get_country(ip)
+    output = run_geoiplookup(ip)
+    country = parse_geoip_country_output(output)
     area = ""
     city = ""
-
-    try:
-        output = subprocess.check_output(
-            ["geoiplookup", ip],
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-            text=True,
-        ).strip()
-    except Exception:
-        output = ""
 
     parsed_city = parse_geoip_city_output(output)
     if parsed_city:
@@ -778,6 +804,10 @@ async def get_traffic_stats(
 ):
     verify_admin_token(authorization, x_admin_token)
 
+    cached_payload = get_cached_traffic_payload(datetime.now(timezone.utc))
+    if cached_payload is not None:
+        return cached_payload
+
     try:
         result = await db.execute(select(User.uid, User.email, User.in_game_name))
         users = result.fetchall()
@@ -1058,7 +1088,7 @@ async def get_traffic_stats(
         save_json(IP_GEO_FILE, ip_geo)
         save_json(SEEN_LINE_HASHES_FILE, (seen_hashes + new_hashes)[-SEEN_HASH_LIMIT:])
 
-        return {
+        return cache_traffic_payload({
             "generated_at": now.isoformat(),
             "postgres_total": postgres_total,
             "profile_gap_count": len(profile_gap_uids),
@@ -1111,7 +1141,7 @@ async def get_traffic_stats(
                 "visitor_sessions_24h": visitor_sessions_24h,
                 "primary_host_visitor_sessions_24h": primary_host_visitor_sessions_24h,
             },
-        }
+        }, now)
 
     except Exception as exc:
         print(f"[traffic] route failed: {exc}")

@@ -34,6 +34,7 @@ Production FastAPI backend for AoE2HDBets.
 
 - traffic diagnostics data
 - requires admin bearer token (`ADMIN_TOKEN`)
+- uses a short in-process response cache (`TRAFFIC_RESPONSE_CACHE_SECONDS`, default 20s) to avoid rebuilding the full nginx tail + geo summary on every poll
 
 ## Local development
 
@@ -61,6 +62,7 @@ Optional/common:
 - `CHAIN_ID`
 - `ALLOWED_ORIGINS`
 - `TRAFFIC_STATE_DIR` (default: `runtime/` in repo root)
+- `TRAFFIC_RESPONSE_CACHE_SECONDS` (default: `20`; set `0` to disable the in-process `/api/traffic` response cache)
 - `AOE2_API_BASE_URL` (used by `parse_replay.py` for non-local targets; default `https://api-prodn.aoe2hdbets.com`)
 - `LOG_REQUESTS=true` to enable request-line logging (disabled by default in production)
 - `ENABLE_TRACE_LOGS=true` to emit replay `.trace` files and `trace.index` while debugging replay behavior
@@ -123,3 +125,4 @@ python scripts/set_admin.py --email you@example.com --unset
 - replay/live/final behavior is much healthier than earlier, but still worth documenting carefully as it evolves
 - exact postgame achievement-table extraction is still not part of the replay pipeline
 - local trace output is expected while building if trace logging is enabled
+- `tests/test_fast.py` now skips replay fixtures that are absent from `tests/recs/`; restore DE/HD fixtures if you want that suite to become a hard gate again
