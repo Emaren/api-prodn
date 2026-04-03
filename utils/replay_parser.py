@@ -572,7 +572,7 @@ def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
         stats["disconnect_detected"] = not completed and len(resigned_player_numbers) == 0
         stats = _apply_completion_metadata(stats)
 
-        dt = extract_datetime_from_filename(os.path.basename(replay_path))
+        dt = extract_datetime_from_filename(replay_path)
         stats["played_on"] = dt.isoformat() if dt else None
         stats = _maybe_apply_hd_early_exit_rules(stats, apply_hd_early_exit_rules)
 

@@ -1,4 +1,5 @@
 # app.py
+from datetime import datetime
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -54,6 +55,12 @@ def _game_identity_key(game: GameStats) -> str:
     if getattr(game, "replay_hash", None):
         return f"hash:{game.replay_hash}"
     return f"id:{game.id}"
+
+
+def _public_match_sort_key(game: GameStats):
+    played_at = game.public_played_at() or datetime.min
+    parsed_at = game.timestamp or game.created_at or datetime.min
+    return (played_at, parsed_at, game.id or 0)
 
 
 def _parse_allowed_origins() -> list[str]:
@@ -152,10 +159,16 @@ async def get_game_stats(db_gen=Depends(get_db)):
                 if identity_key not in unique_games:
                     unique_games[identity_key] = game
 
+            ordered_games = sorted(
+                unique_games.values(),
+                key=_public_match_sort_key,
+                reverse=True,
+            )
+
             logging.getLogger(__name__).info(
                 f"📊 Returning {len(unique_games)} unique games from DB"
             )
-            return [g.to_dict() for g in unique_games.values()]
+            return [g.to_dict() for g in ordered_games]
     except Exception as e:
         logging.error(f"❌ Failed to fetch game stats: {e}", exc_info=True)
         return []

@@ -8,6 +8,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from db.base import Base
+from utils.extract_datetime import extract_datetime_from_filename
 
 def is_render():
     return os.getenv("RENDER") == "1"
@@ -47,9 +48,28 @@ class GameStats(Base):
     def __repr__(self):
         return f"<GameStats {self.replay_hash} - Final: {self.is_final}>"
 
+    def _filename_played_on(self):
+        for value in (self.original_filename, self.replay_file):
+            if not value:
+                continue
+            parsed = extract_datetime_from_filename(str(value))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def public_played_at(self):
+        return (
+            self.played_on
+            or self._filename_played_on()
+            or self.created_at
+            or self.timestamp
+        )
+
     def to_dict(self):
         logger = getLogger(__name__)
         trace_enabled = os.getenv("ENABLE_TRACE_LOGS", "true").lower() == "true"
+        derived_played_on = self._filename_played_on()
+        played_at = self.played_on or derived_played_on or self.created_at or self.timestamp
 
         try:
             map_data = json.loads(self.map) if isinstance(self.map, str) else self.map
@@ -132,8 +152,11 @@ class GameStats(Base):
             "players": players,
             "event_types": event_types,
             "key_events": key_events,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "derived_played_on": derived_played_on.isoformat() if derived_played_on else None,
             "played_on": self.played_on.isoformat() if self.played_on else None,
+            "played_at": played_at.isoformat() if played_at else None,
             "parse_iteration": self.parse_iteration,
             "is_final": self.is_final,
             "disconnect_detected": self.disconnect_detected,

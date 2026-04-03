@@ -10,6 +10,7 @@ Production FastAPI backend for AoE2HDBets.
 
 - replay ingestion and parsing
 - `game_stats` persistence in Postgres
+- canonical recent-match recency for public feeds via `played_at` (`played_on` → filename/file-mtime derived → `created_at` → `timestamp`)
 - live/non-final replay handling for watcher uploads
 - user/admin endpoints
 - traffic diagnostics endpoint
@@ -35,6 +36,12 @@ Production FastAPI backend for AoE2HDBets.
 - traffic diagnostics data
 - requires admin bearer token (`ADMIN_TOKEN`)
 - uses a short in-process response cache (`TRAFFIC_RESPONSE_CACHE_SECONDS`, default 20s) to avoid rebuilding the full nginx tail + geo summary on every poll
+
+### `GET /api/game_stats`
+
+- returns final replay rows for public match surfaces
+- orders recent matches by canonical `played_at`, not mutable parse/update bookkeeping timestamps
+- payload includes `played_at`, `played_on`, `derived_played_on`, `created_at`, and `timestamp`
 
 ## Local development
 

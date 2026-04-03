@@ -75,6 +75,19 @@ That is expected during active replay debugging and is not, by itself, a failure
 
 Delete those artifacts when you want a cleaner repo snapshot, but leave logging on while building if the visibility is useful.
 
+## Replay recency contract
+
+Public recent-match surfaces should trust `played_at` from `/api/game_stats`.
+
+Backend priority is:
+
+- `played_on`
+- filename-derived replay time, with local file mtime fallback when the filename has no parseable timestamp
+- `created_at`
+- `timestamp` as the final fallback only
+
+`timestamp` remains a parse/update bookkeeping signal and should not be treated as “match was played at” for public ordering.
+
 ## What to verify before trusting results
 
 Before trusting a future test pass, verify:

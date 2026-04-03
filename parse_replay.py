@@ -57,7 +57,9 @@ async def parse_and_send(
         return False
 
     replay_name = original_filename or os.path.basename(replay_path)
-    played_on = extract_datetime_from_filename(replay_name)
+    played_on = extract_datetime_from_filename(replay_name) or extract_datetime_from_filename(
+        replay_path
+    )
     parsed["played_on"] = played_on.isoformat() if played_on else None
     parsed["replay_file"] = replay_path
     parsed["original_filename"] = replay_name
@@ -175,7 +177,11 @@ async def main():
                 for f in os.listdir(path)
                 if f.endswith((".aoe2record", ".aoe2mpgame", ".mgz", ".mgx", ".mgl"))
             ]
-            files.sort(key=lambda f: extract_datetime_from_filename(f) or datetime.min, reverse=True)
+            files.sort(
+                key=lambda f: extract_datetime_from_filename(os.path.join(path, f))
+                or datetime.min,
+                reverse=True,
+            )
 
             for fname in files:
                 full_path = os.path.join(path, fname)
