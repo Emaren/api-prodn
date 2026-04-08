@@ -19,7 +19,8 @@ from routes.admin_routes_async import verify_admin_token
 
 router = APIRouter()
 
-LOG_PATH = "/var/log/nginx/access.log"
+DEFAULT_DEDICATED_LOG_PATH = "/var/log/nginx/aoe2hdbets.access.log"
+DEFAULT_SHARED_LOG_PATH = "/var/log/nginx/access.log"
 BASE_DIR = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = BASE_DIR / "scripts"
 STATE_DIR = Path(os.getenv("TRAFFIC_STATE_DIR", str(BASE_DIR / "runtime")))
@@ -172,6 +173,32 @@ COUNTRY_CODE_MAP = {
     "BR": "Brazil",
     "MX": "Mexico",
 }
+
+
+def resolve_log_path():
+    candidates = []
+
+    for env_key in ("AOE2_TRAFFIC_LOG_PATH", "TRAFFIC_LOG_PATH"):
+        raw = os.getenv(env_key, "").strip()
+        if raw:
+            candidates.append(raw)
+
+    candidates.extend([DEFAULT_DEDICATED_LOG_PATH, DEFAULT_SHARED_LOG_PATH])
+
+    seen = set()
+    ordered_candidates = []
+    for candidate in candidates:
+        normalized = str(Path(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered_candidates.append(normalized)
+
+    for candidate in ordered_candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return ordered_candidates[0]
 
 
 def safe_int(value, default=0):
@@ -885,7 +912,8 @@ async def get_traffic_stats(
 
         max_log_time = None
 
-        lines = read_recent_log_lines(LOG_PATH, TAIL_LINES)
+        log_path = resolve_log_path()
+        lines = read_recent_log_lines(log_path, TAIL_LINES)
 
         for line in lines:
             parsed = parse_log_line(line)
@@ -1090,6 +1118,7 @@ async def get_traffic_stats(
 
         return cache_traffic_payload({
             "generated_at": now.isoformat(),
+            "log_source_path": log_path,
             "postgres_total": postgres_total,
             "profile_gap_count": len(profile_gap_uids),
             "profile_gap_uids": profile_gap_uids,

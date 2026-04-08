@@ -36,6 +36,7 @@ Production FastAPI backend for AoE2HDBets.
 - traffic diagnostics data
 - requires admin bearer token (`ADMIN_TOKEN`)
 - uses a short in-process response cache (`TRAFFIC_RESPONSE_CACHE_SECONDS`, default 20s) to avoid rebuilding the full nginx tail + geo summary on every poll
+- reads the dedicated AoE2 nginx log first (`/var/log/nginx/aoe2hdbets.access.log`) and falls back to the shared nginx access log only if needed
 
 ### `GET /api/game_stats`
 
@@ -69,6 +70,8 @@ Optional/common:
 - `CHAIN_ID`
 - `ALLOWED_ORIGINS`
 - `TRAFFIC_STATE_DIR` (default: `runtime/` in repo root)
+- `AOE2_TRAFFIC_LOG_PATH` (preferred override for the AoE2 local traffic diagnostics reader; defaults to `/var/log/nginx/aoe2hdbets.access.log` with fallback to `/var/log/nginx/access.log`)
+- `TRAFFIC_LOG_PATH` (legacy-compatible fallback override for the same AoE2 diagnostics reader)
 - `TRAFFIC_RESPONSE_CACHE_SECONDS` (default: `20`; set `0` to disable the in-process `/api/traffic` response cache)
 - `AOE2_API_BASE_URL` (used by `parse_replay.py` for non-local targets; default `https://api-prodn.aoe2hdbets.com`)
 - `LOG_REQUESTS=true` to enable request-line logging (disabled by default in production)
