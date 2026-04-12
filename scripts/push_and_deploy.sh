@@ -41,16 +41,17 @@ if [[ -n "${VPS_HOST:-}" ]]; then
   ssh "$VPS_HOST" "\
     set -euo pipefail; \
     cd '$VPS_PATH/app-prodn' && git pull --ff-only origin '$BRANCH'; \
-    cd '$VPS_PATH/api-prodn' && git pull --ff-only origin '$BRANCH'; \
-    if [ -d '$VPS_PATH/aoe2-watcher/.git' ]; then cd '$VPS_PATH/aoe2-watcher' && git pull --ff-only origin '$BRANCH'; fi"
-  echo "✔ VPS repos updated. Restart your services/process manager next."
+    cd '$VPS_PATH/api-prodn' && git pull --ff-only origin '$BRANCH'"
+  echo "✔ VPS repos updated."
+  echo "ℹ Watcher source is MBP-local now; VPS serves built watcher artifacts from public/downloads."
+  echo "ℹ If you built a new watcher release, run watcher:sync locally and then deploy/copy the downloads output."
 else
   cat <<EOF
 No VPS host configured. To pull on your VPS manually:
   cd /var/www/AoE2HDBets/app-prodn && git pull --ff-only origin $BRANCH
   cd /var/www/AoE2HDBets/api-prodn && git pull --ff-only origin $BRANCH
-  cd /var/www/AoE2HDBets/aoe2-watcher && git pull --ff-only origin $BRANCH
 
-Then restart your frontend/backend processes.
+Watcher source stays local on MBP.
+VPS should only host the built watcher artifacts in app-prodn/public/downloads.
 EOF
 fi
