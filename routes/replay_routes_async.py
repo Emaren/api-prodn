@@ -489,7 +489,7 @@ def _infer_incomplete_uploader_outcome(parsed: dict, user, claimed_name: Optiona
 
 def _has_reliable_final_signal(parsed: dict, inferred_outcome: Optional[dict] = None):
     if inferred_outcome:
-        return False
+        return True
 
     key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
     if key_events.get("completed") is True:
