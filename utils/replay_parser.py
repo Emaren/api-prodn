@@ -119,8 +119,11 @@ def _extract_hd_player_ratings(parsed_header):
         if isinstance(steam_id, int) and steam_id <= 0:
             steam_id = None
 
-        rm_rating = getattr(player, "hd_rm_rating", None)
-        dm_rating = getattr(player, "hd_dm_rating", None)
+        # AoE2 HD parser/library labels are reversed in practice for this replay path:
+        #   hd_dm_rating matches the visible HD RM line
+        #   hd_rm_rating matches the visible HD DM line
+        rm_rating = getattr(player, "hd_dm_rating", None)
+        dm_rating = getattr(player, "hd_rm_rating", None)
 
         ratings[player_number] = {
             "steam_id": str(steam_id) if steam_id else None,
@@ -509,8 +512,9 @@ def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
             }
             if achievements:
                 p_data["achievements"] = achievements
-            if rate_snapshot is not None and p_data["steam_rm_rating"] is None:
-                p_data["steam_rm_rating"] = rate_snapshot
+            # HD rate_snapshot follows the visible DM-looking value, not the visible RM line.
+            if rate_snapshot is not None and p_data["steam_dm_rating"] is None:
+                p_data["steam_dm_rating"] = rate_snapshot
             platform_rating = platform_ratings.get(p_data["name"])
             if platform_rating is not None and p_data["rate_snapshot"] is None:
                 p_data["rate_snapshot"] = platform_rating
