@@ -25,7 +25,7 @@ logging.basicConfig(level=getattr(logging, LOGGING_LEVEL, logging.DEBUG))
 PRODUCTION_API_BASE = (
     os.environ.get("AOE2_API_BASE_URL")
     or config.get("aoe2_api_base_url")
-    or "https://api-prodn.aoe2hdbets.com"
+    or "https://api-prodn.aoe2war.com"
 ).rstrip("/")
 
 ENDPOINTS = {

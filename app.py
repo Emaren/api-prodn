@@ -71,9 +71,9 @@ def _parse_allowed_origins() -> list[str]:
             "http://localhost:3001",
             "http://localhost:3002",
             "https://aoe2-betting.vercel.app",
-            "https://aoe2hdbets.com",
-            "https://www.aoe2hdbets.com",
-            "https://app-staging.aoe2hdbets.com",
+            "https://aoe2war.com",
+            "https://www.aoe2war.com",
+            "https://app-staging.aoe2war.com",
         ]
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 

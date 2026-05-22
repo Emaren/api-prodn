@@ -595,14 +595,14 @@ def counter_sum_for_aliases(counter, aliases):
 def get_primary_host_aliases():
     raw = os.getenv(
         "TRAFFIC_PRIMARY_HOST_ALIASES",
-        "aoe2hdbets.com,www.aoe2hdbets.com",
+        "aoe2war.com,www.aoe2war.com",
     )
     aliases = []
     for value in raw.split(","):
         normalized = normalize_host(value)
         if normalized and normalized not in aliases and normalized != UNKNOWN_HOST:
             aliases.append(normalized)
-    return aliases or ["aoe2hdbets.com"]
+    return aliases or ["aoe2war.com"]
 
 
 def normalize_user_agent_key(ua):

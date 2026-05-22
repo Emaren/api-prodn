@@ -73,7 +73,7 @@ Optional/common:
 - `AOE2_TRAFFIC_LOG_PATH` (preferred override for the AoE2 local traffic diagnostics reader; defaults to `/var/log/nginx/aoe2hdbets.access.log` with fallback to `/var/log/nginx/access.log`)
 - `TRAFFIC_LOG_PATH` (legacy-compatible fallback override for the same AoE2 diagnostics reader)
 - `TRAFFIC_RESPONSE_CACHE_SECONDS` (default: `20`; set `0` to disable the in-process `/api/traffic` response cache)
-- `AOE2_API_BASE_URL` (used by `parse_replay.py` for non-local targets; default `https://api-prodn.aoe2hdbets.com`)
+- `AOE2_API_BASE_URL` (used by `parse_replay.py` for non-local targets; default `https://api-prodn.aoe2war.com`)
 - `LOG_REQUESTS=true` to enable request-line logging (disabled by default in production)
 - `ENABLE_TRACE_LOGS=true` to emit replay `.trace` files and `trace.index` while debugging replay behavior
 - `ALLOW_UNVERIFIED_BEARER_IDENTITY=true` only for legacy compatibility; keep disabled in production

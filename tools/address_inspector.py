@@ -8,7 +8,7 @@ if len(sys.argv) != 2:
     sys.exit(1)
 
 address = sys.argv[1]
-API_BASE = "https://api.aoe2hdbets.com"
+API_BASE = "https://api-prodn.aoe2war.com"
 
 def query(path):
     url = f"{API_BASE}{path}"
