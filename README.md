@@ -25,6 +25,7 @@ Production FastAPI backend for AoE2HDBets.
 - supports live/non-final replay iterations
 - supports final replay upload after file settlement
 - supports `x-api-key` when `INTERNAL_API_KEY` is configured
+- falls back to explicit `header_only_summary_fallback` metadata if `mgz.summary` cannot decode a replay but the header remains readable; this preserves watcher proof and player identity without inventing winner/score/economy truth
 
 ### `POST /api/parse_replay`
 
@@ -133,6 +134,7 @@ python scripts/set_admin.py --email you@example.com --unset
 ## Current known edges
 
 - replay/live/final behavior is much healthier than earlier, but still worth documenting carefully as it evolves
+- header-only replay fallback rows are useful proof breadcrumbs, not authoritative postgame result rows
 - exact postgame achievement-table extraction is still not part of the replay pipeline
 - local trace output is expected while building if trace logging is enabled
 - `tests/test_fast.py` now skips replay fixtures that are absent from `tests/recs/`; restore DE/HD fixtures if you want that suite to become a hard gate again

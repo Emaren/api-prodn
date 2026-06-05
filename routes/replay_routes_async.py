@@ -500,6 +500,8 @@ def _has_reliable_final_signal(parsed: dict, inferred_outcome: Optional[dict] = 
         return True
     if _coerce_positive_int(key_events.get("player_score_count")) > 0:
         return True
+    if key_events.get("header_only_fallback") is True and parsed.get("players"):
+        return True
 
     winner = parsed.get("winner")
     if isinstance(winner, str):

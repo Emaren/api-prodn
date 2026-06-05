@@ -7,7 +7,8 @@ import hashlib
 import math
 import aiofiles
 import asyncio
-from mgz import header, summary
+import uuid
+from mgz import const, header, summary
 from utils.extract_datetime import extract_datetime_from_filename
 
 CIVILIZATION_NAMES = {
@@ -169,6 +170,52 @@ def _normalize_position(value):
         cleaned.append(int(round(part)))
 
     return cleaned
+
+
+def _safe_get(source, key, default=None):
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(key, default)
+    try:
+        return getattr(source, key)
+    except Exception:
+        pass
+    try:
+        return source[key]
+    except Exception:
+        return default
+
+
+def _safe_int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _safe_decode_text(value):
+    raw = _safe_get(value, "value", value)
+    if isinstance(raw, str):
+        return raw.strip("\x00").strip() or None
+    if isinstance(raw, bytes):
+        cleaned = raw.strip(b"\x00")
+        for encoding in ("utf-8", "latin-1", "cp1252", "cp437"):
+            try:
+                decoded = cleaned.decode(encoding).strip()
+            except UnicodeDecodeError:
+                continue
+            if decoded:
+                return decoded
+    return None
 
 
 def _has_meaningful_value(value):
@@ -449,6 +496,183 @@ def _maybe_apply_hd_early_exit_rules(stats, apply_rules=True):
     return _apply_hd_early_exit_rules(stats)
 
 
+def _header_map_id(parsed_header):
+    hd = _safe_get(parsed_header, "hd")
+    de = _safe_get(parsed_header, "de")
+    scenario = _safe_get(parsed_header, "scenario")
+    game_settings = _safe_get(scenario, "game_settings")
+
+    return (
+        _safe_int(_safe_get(hd, "selected_map_id"))
+        or _safe_int(_safe_get(de, "resolved_map_id"))
+        or _safe_int(_safe_get(game_settings, "map_id"))
+    )
+
+
+def _header_map_payload(parsed_header):
+    map_info = _safe_get(parsed_header, "map_info")
+    dimension = _safe_int(_safe_get(map_info, "size_x"))
+    map_id = _header_map_id(parsed_header)
+    de_names = getattr(const, "DE_MAP_NAMES", {})
+    map_names = getattr(const, "MAP_NAMES", {})
+    map_name = de_names.get(map_id) or map_names.get(map_id) or "Unknown"
+
+    return {
+        "id": map_id,
+        "name": map_name,
+        "size": const.MAP_SIZES.get(dimension, "Unknown"),
+        "dimension": dimension,
+        "header_only": True,
+    }
+
+
+def _header_platform_match_id(parsed_header):
+    hd = _safe_get(parsed_header, "hd")
+    de = _safe_get(parsed_header, "de")
+    guid = _safe_get(hd, "guid") or _safe_get(de, "guid")
+    if not isinstance(guid, (bytes, bytearray)) or len(guid) != 16:
+        return None
+    try:
+        return str(uuid.UUID(bytes=bytes(guid)))
+    except Exception:
+        return None
+
+
+def _extract_header_player_rows(parsed_header):
+    players_by_number = {}
+    ratings_by_number = _extract_hd_player_ratings(parsed_header)
+    initial = _safe_get(parsed_header, "initial")
+
+    for index, raw_player in enumerate(_safe_get(initial, "players", []) or []):
+        attributes = _safe_get(raw_player, "attributes")
+        name = _safe_decode_text(_safe_get(attributes, "player_name"))
+        if not name or name.upper() == "GAIA":
+            continue
+
+        number = (
+            _safe_int(_safe_get(raw_player, "number"))
+            or _safe_int(_safe_get(raw_player, "player_number"))
+            or index
+        )
+        if number <= 0:
+            continue
+
+        civilization = _safe_int(_safe_get(raw_player, "civilization"))
+        player = {
+            "name": name,
+            "number": number,
+            "civilization": civilization,
+            "civilization_name": _normalize_civilization_name(civilization),
+            "winner": None,
+            "score": None,
+            "user_id": None,
+            "steam_id": None,
+            "steam_rm_rating": None,
+            "steam_dm_rating": None,
+            "rate_snapshot": None,
+            "eapm": None,
+            "position": None,
+            "color_id": _safe_int(_safe_get(raw_player, "player_color")),
+            "team_id": None,
+            "human": None,
+            "header_only": True,
+        }
+        player.update(ratings_by_number.get(number) or {})
+        player["user_id"] = player.get("steam_id")
+        players_by_number[number] = player
+
+    hd = _safe_get(parsed_header, "hd")
+    for raw_player in _safe_get(hd, "players", []) or []:
+        number = _safe_int(_safe_get(raw_player, "player_number"))
+        if not number or number <= 0:
+            continue
+
+        name = _safe_decode_text(_safe_get(raw_player, "name"))
+        existing = players_by_number.get(number) or {
+            "name": name or f"Player {number}",
+            "number": number,
+            "civilization": None,
+            "civilization_name": None,
+            "winner": None,
+            "score": None,
+            "user_id": None,
+            "steam_id": None,
+            "steam_rm_rating": None,
+            "steam_dm_rating": None,
+            "rate_snapshot": None,
+            "eapm": None,
+            "position": None,
+            "color_id": None,
+            "team_id": None,
+            "human": None,
+            "header_only": True,
+        }
+        if name:
+            existing["name"] = name
+        steam_id = _normalize_steam_id(_safe_get(raw_player, "steam_id"))
+        if steam_id:
+            existing["steam_id"] = steam_id
+            existing["user_id"] = steam_id
+        existing.update({key: value for key, value in (ratings_by_number.get(number) or {}).items() if value is not None})
+        players_by_number[number] = existing
+
+    return [
+        players_by_number[number]
+        for number in sorted(players_by_number)
+        if players_by_number[number].get("name")
+    ]
+
+
+def _parse_header_only_bytes(replay_path, file_bytes, parse_error):
+    try:
+        parsed_header = header.parse(file_bytes)
+    except Exception as header_error:
+        logging.error(f"❌ header fallback parse failed: {header_error}")
+        return None
+
+    map_payload = _header_map_payload(parsed_header)
+    players = _extract_header_player_rows(parsed_header)
+    hd = _safe_get(parsed_header, "hd")
+    platform_match_id = _header_platform_match_id(parsed_header)
+    key_events = {
+        "completed": False,
+        "header_only_fallback": True,
+        "summary_parse_error": str(parse_error)[:160],
+        "postgame_available": False,
+        "has_scores": False,
+        "has_achievements": False,
+        "player_score_count": 0,
+        "achievement_player_count": 0,
+        "achievement_shell_count": 0,
+        "has_achievement_shell": False,
+        "platform_id": "hd" if _safe_get(hd, "multiplayer") else None,
+        "platform_match_id": platform_match_id,
+        "rated": bool(_safe_get(hd, "is_ranked")) if hd else None,
+    }
+
+    dt = extract_datetime_from_filename(replay_path)
+    stats = {
+        "game_version": str(_safe_get(parsed_header, "version", "Unknown")),
+        "map": map_payload,
+        "game_type": str(_safe_get(_safe_get(parsed_header, "lobby"), "game_type", "Unknown")),
+        "duration": 0,
+        "players": players,
+        "winner": "Unknown",
+        "event_types": [],
+        "key_events": key_events,
+        "completed": False,
+        "disconnect_detected": False,
+        "parse_reason": "header_only_summary_fallback",
+        "played_on": dt.isoformat() if dt else None,
+    }
+    logging.warning(
+        "⚠️ header-only replay fallback used for %s after summary parse failed: %s",
+        replay_path,
+        parse_error,
+    )
+    return stats
+
+
 def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
     try:
         h = header.parse(file_bytes)
@@ -585,7 +809,7 @@ def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
 
     except Exception as e:
         logging.error(f"❌ sync parse error: {e}")
-        return None
+        return _parse_header_only_bytes(replay_path, file_bytes, e)
 
 # ───────────────────────────────────────────────
 # 🔐 Async SHA256 Hash for replay file

@@ -172,6 +172,22 @@ def test_has_reliable_final_signal_rejects_paused_unknown_replay():
     )
 
 
+def test_has_reliable_final_signal_accepts_header_only_fallback_with_players():
+    assert _has_reliable_final_signal(
+        {
+            "winner": "Unknown",
+            "players": [
+                {"name": "Julio Alvarez", "header_only": True},
+                {"name": "gauthier.massicot", "header_only": True},
+            ],
+            "key_events": {
+                "completed": False,
+                "header_only_fallback": True,
+            },
+        }
+    )
+
+
 def test_normalize_live_disconnect_detected_clears_active_live_false_positive():
     assert not _normalize_live_disconnect_detected(
         False,
