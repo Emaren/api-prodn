@@ -5,6 +5,8 @@ from types import SimpleNamespace
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from routes.replay_routes_async import (
+    UNPARSED_FINAL_PARSE_REASON,
+    _build_unparsed_watcher_final_payload,
     _derive_upload_parse_metadata,
     _extract_platform_match_id,
     _has_reliable_final_signal,
@@ -188,6 +190,46 @@ def test_has_reliable_final_signal_accepts_header_only_fallback_with_players():
     )
 
 
+def test_build_unparsed_watcher_final_payload_preserves_uploader_identity_and_time():
+    user = SimpleNamespace(
+        uid="u_julio",
+        steam_id="76561198190973517",
+        in_game_name="Julio Alvarez",
+        steam_persona_name="Julio",
+    )
+
+    payload = _build_unparsed_watcher_final_payload(
+        original_name="MP Replay v5.8 @2026.06.05 093848 (2).aoe2record",
+        uploader_uid="u_julio",
+        uploader_user=user,
+        claimed_name=None,
+        parse_failure_detail="Failed to parse replay file.",
+        file_size_bytes=1147959,
+    )
+
+    assert payload["parse_reason"] == UNPARSED_FINAL_PARSE_REASON
+    assert payload["winner"] == "Unknown"
+    assert payload["played_on"].year == 2026
+    assert payload["played_on"].hour == 9
+    assert payload["players"] == [
+        {
+            "name": "Julio Alvarez",
+            "civilization": "Unknown",
+            "team": None,
+            "score": None,
+            "winner": None,
+            "position": None,
+            "user_id": "76561198190973517",
+            "steam_rm_rating": None,
+            "steam_dm_rating": None,
+            "eapm": None,
+            "watcher_uploader_fallback": True,
+        }
+    ]
+    assert payload["key_events"]["watcher_final_unparsed"] is True
+    assert payload["key_events"]["uploader_player_name"] == "Julio Alvarez"
+
+
 def test_normalize_live_disconnect_detected_clears_active_live_false_positive():
     assert not _normalize_live_disconnect_detected(
         False,
@@ -235,6 +277,21 @@ def test_should_upgrade_duplicate_final_when_resignation_truth_is_clearer():
             "achievement_player_count": 0,
             "achievement_shell_count": 2,
         },
+    )
+
+
+def test_should_upgrade_duplicate_final_when_existing_row_is_unparsed_proof():
+    existing_game = SimpleNamespace(
+        parse_reason=UNPARSED_FINAL_PARSE_REASON,
+        disconnect_detected=False,
+        key_events={"watcher_final_unparsed": True},
+    )
+
+    assert _should_upgrade_duplicate_final(
+        existing_game,
+        "header_only_summary_fallback",
+        False,
+        {"header_only_fallback": True},
     )
 
 

@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover
     ReplayParseAttempt = None  # type: ignore
 
 from utils.replay_parser import parse_replay_full, hash_replay_file
+from utils.extract_datetime import extract_datetime_from_filename
 
 router = APIRouter(prefix="/api", tags=["replay"])
 
@@ -31,6 +32,7 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")  # optional; if set, enforces a
 MAX_REPLAY_UPLOAD_BYTES = int(os.getenv("MAX_REPLAY_UPLOAD_BYTES", str(250 * 1024 * 1024)))
 SUPERSEDED_PARSE_REASON = "superseded_by_later_upload"
 PLACEHOLDER_LIVE_PARSE_REASON = "watcher_live_pending_parse"
+UNPARSED_FINAL_PARSE_REASON = "watcher_final_unparsed"
 
 WATCHER_KEY_RE = re.compile(r"^wolo_([a-f0-9]{12})_(.+)$", re.IGNORECASE)
 
@@ -81,6 +83,13 @@ def _safe_iso_datetime(value: str | None):
 def _clean_detail(value: str | None, fallback: str | None = None):
     cleaned = " ".join((value or fallback or "").split()).strip()
     return cleaned[:255] if cleaned else None
+
+
+def _clean_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split()).strip()
+    return cleaned[:120] if cleaned else None
 
 
 def _extract_platform_match_id(value: object) -> str | None:
@@ -165,6 +174,75 @@ def _map_payload(data: ParseReplayRequest):
         map_size = map_payload.get("size", "Unknown")
 
     return {"name": map_name, "size": map_size}
+
+
+def _fallback_uploader_player(user, claimed_name: Optional[str]):
+    name = (
+        _clean_name(claimed_name)
+        or _clean_name(getattr(user, "in_game_name", None))
+        or _clean_name(getattr(user, "steam_persona_name", None))
+        or _clean_name(getattr(user, "username", None))
+        or _clean_name(getattr(user, "uid", None))
+    )
+    if not name:
+        return None
+
+    steam_id = getattr(user, "steam_id", None)
+    steam_id = str(steam_id).strip() if steam_id else None
+
+    return {
+        "name": name,
+        "civilization": "Unknown",
+        "team": None,
+        "score": None,
+        "winner": None,
+        "position": None,
+        "user_id": steam_id,
+        "steam_rm_rating": None,
+        "steam_dm_rating": None,
+        "eapm": None,
+        "watcher_uploader_fallback": True,
+    }
+
+
+def _build_unparsed_watcher_final_payload(
+    *,
+    original_name: str,
+    uploader_uid: Optional[str],
+    uploader_user,
+    claimed_name: Optional[str],
+    parse_failure_detail: str,
+    file_size_bytes: int,
+):
+    player = _fallback_uploader_player(uploader_user, claimed_name)
+    players = [player] if player else []
+    played_on = extract_datetime_from_filename(original_name)
+    key_events = {
+        "completed": False,
+        "watcher_final_unparsed": True,
+        "parse_failed": True,
+        "parse_failure_detail": _clean_detail(parse_failure_detail),
+        "uploader_uid": uploader_uid,
+        "original_filename": original_name,
+        "file_size_bytes": file_size_bytes,
+    }
+    if player:
+        key_events["uploader_player_name"] = player["name"]
+
+    return {
+        "game_version": None,
+        "map": {"name": "Unknown", "size": "Unknown"},
+        "game_type": None,
+        "duration": 0,
+        "game_duration": 0,
+        "winner": "Unknown",
+        "players": players,
+        "event_types": [],
+        "key_events": key_events,
+        "played_on": played_on,
+        "disconnect_detected": False,
+        "parse_reason": UNPARSED_FINAL_PARSE_REASON,
+    }
 
 
 def _norm_name(s: str) -> str:
@@ -345,6 +423,25 @@ async def _load_existing_placeholder_live_game(
     return result.scalars().first()
 
 
+async def _load_existing_unparsed_final_game(
+    db,
+    uploader_uid: Optional[str],
+    original_filename: Optional[str],
+):
+    if not original_filename:
+        return None
+
+    result = await db.execute(
+        select(GameStats)
+        .where(GameStats.user_uid == (uploader_uid or "system"))
+        .where(GameStats.original_filename == original_filename)
+        .where(GameStats.is_final.is_(True))
+        .where(GameStats.parse_reason == UNPARSED_FINAL_PARSE_REASON)
+        .order_by(GameStats.id.desc())
+    )
+    return result.scalars().first()
+
+
 def _apply_parsed_upload_to_game(
     game,
     *,
@@ -386,6 +483,39 @@ def _apply_parsed_upload_to_game(
     game.timestamp = datetime.utcnow()
     if played_on is not None:
         game.played_on = played_on
+
+
+def _apply_unparsed_final_upload_to_game(
+    game,
+    *,
+    uploader_uid: Optional[str],
+    replay_hash: str,
+    original_name: str,
+    payload: dict,
+    parse_iteration: int,
+    parse_source: str,
+):
+    game.user_uid = uploader_uid or "system"
+    game.replay_file = original_name
+    game.replay_hash = replay_hash
+    game.game_version = payload.get("game_version")
+    game.map = payload.get("map")
+    game.game_type = payload.get("game_type")
+    game.duration = payload.get("duration") or 0
+    game.game_duration = payload.get("game_duration") or 0
+    game.winner = payload.get("winner") or "Unknown"
+    game.players = payload.get("players") if isinstance(payload.get("players"), list) else []
+    game.event_types = payload.get("event_types") if isinstance(payload.get("event_types"), list) else []
+    game.key_events = payload.get("key_events") if isinstance(payload.get("key_events"), dict) else {}
+    game.parse_iteration = parse_iteration
+    game.is_final = True
+    game.disconnect_detected = False
+    game.parse_source = parse_source
+    game.parse_reason = UNPARSED_FINAL_PARSE_REASON
+    game.original_filename = original_name
+    game.timestamp = datetime.utcnow()
+    if payload.get("played_on") is not None:
+        game.played_on = payload.get("played_on")
 
 
 async def _load_existing_final_by_platform_match_id(db, platform_match_id: Optional[str]):
@@ -582,6 +712,9 @@ def _should_upgrade_duplicate_final(
 ):
     existing_key_events = getattr(existing_game, "key_events", {}) or {}
     existing_parse_reason = getattr(existing_game, "parse_reason", None)
+
+    if existing_parse_reason == UNPARSED_FINAL_PARSE_REASON and incoming_parse_reason != existing_parse_reason:
+        return True
 
     if incoming_parse_reason == "recorded_resignation_final" and existing_parse_reason != incoming_parse_reason:
         return True
@@ -931,6 +1064,132 @@ async def upload_replay_file(
                         "parse_iteration": parse_iteration,
                         "is_final": False,
                         "pending_parse": True,
+                    }
+
+                if is_final_upload and mode == "watcher":
+                    parse_source, _ = _derive_upload_parse_metadata(
+                        upload_mode=mode,
+                        is_final=True,
+                        requested_source=x_parse_source,
+                        requested_reason=x_parse_reason,
+                        parsed_reason=UNPARSED_FINAL_PARSE_REASON,
+                    )
+                    fallback_payload = _build_unparsed_watcher_final_payload(
+                        original_name=original_name,
+                        uploader_uid=uploader_uid,
+                        uploader_user=uploader_user,
+                        claimed_name=x_player_name,
+                        parse_failure_detail=parse_failure_detail,
+                        file_size_bytes=written,
+                    )
+                    fallback_players = fallback_payload["players"]
+                    fallback_played_on = fallback_payload["played_on"]
+
+                    existing_final = await db.execute(
+                        select(GameStats).where(
+                            GameStats.replay_hash == replay_hash,
+                            GameStats.is_final.is_(True),
+                        )
+                    )
+                    existing_final_game = existing_final.scalars().first()
+                    if existing_final_game:
+                        await _record_parse_attempt(
+                            db,
+                            user_uid=uploader_uid,
+                            replay_hash=replay_hash,
+                            original_filename=original_name,
+                            parse_source=parse_source,
+                            status="duplicate_unparsed_final",
+                            detail="Watcher final replay is already preserved as an unparsed proof row.",
+                            upload_mode=mode,
+                            file_size_bytes=written,
+                            game_stats_id=existing_final_game.id,
+                            played_on=fallback_played_on,
+                        )
+                        await db.commit()
+                        return {
+                            "message": "Watcher final replay already preserved as unparsed proof.",
+                            "replay_hash": replay_hash,
+                            "uploader_uid": uploader_uid,
+                            "upload_mode": mode,
+                            "parse_iteration": parse_iteration,
+                            "is_final": True,
+                            "unparsed_final": True,
+                        }
+
+                    existing_unparsed_final = await _load_existing_unparsed_final_game(
+                        db,
+                        uploader_uid,
+                        original_name,
+                    )
+                    existing_placeholder_live = await _load_existing_placeholder_live_game(
+                        db,
+                        uploader_uid,
+                        original_name,
+                    )
+                    target_game = existing_unparsed_final or existing_placeholder_live
+                    refreshed_existing = target_game is not None
+
+                    if target_game is None:
+                        target_game = GameStats(
+                            user_uid=uploader_uid or "system",
+                            replay_file=original_name,
+                            replay_hash=replay_hash,
+                            game_version=None,
+                            map={"name": "Unknown", "size": "Unknown"},
+                            game_type=None,
+                            duration=0,
+                            game_duration=0,
+                            winner="Unknown",
+                            players=fallback_players,
+                            event_types=[],
+                            key_events=fallback_payload["key_events"],
+                            parse_iteration=parse_iteration,
+                            is_final=True,
+                            disconnect_detected=False,
+                            parse_source=parse_source,
+                            parse_reason=UNPARSED_FINAL_PARSE_REASON,
+                            original_filename=original_name,
+                            played_on=fallback_played_on,
+                        )
+                        db.add(target_game)
+                    else:
+                        _apply_unparsed_final_upload_to_game(
+                            target_game,
+                            uploader_uid=uploader_uid,
+                            replay_hash=replay_hash,
+                            original_name=original_name,
+                            payload=fallback_payload,
+                            parse_iteration=parse_iteration,
+                            parse_source=parse_source,
+                        )
+
+                    await db.flush()
+
+                    await _record_parse_attempt(
+                        db,
+                        user_uid=uploader_uid,
+                        replay_hash=replay_hash,
+                        original_filename=original_name,
+                        parse_source=parse_source,
+                        status="unparsed_final_refreshed" if refreshed_existing else "unparsed_final_stored",
+                        detail="Watcher final replay could not be binary-parsed, so the upload proof was preserved without fabricated match stats.",
+                        upload_mode=mode,
+                        file_size_bytes=written,
+                        game_stats_id=target_game.id,
+                        played_on=fallback_played_on,
+                    )
+                    await db.commit()
+                    return {
+                        "message": "Watcher final replay preserved as unparsed proof.",
+                        "replay_hash": replay_hash,
+                        "winner": "Unknown",
+                        "players_count": len(fallback_players),
+                        "uploader_uid": uploader_uid,
+                        "upload_mode": mode,
+                        "parse_iteration": parse_iteration,
+                        "is_final": True,
+                        "unparsed_final": True,
                     }
 
                 await _record_parse_attempt(
