@@ -9,6 +9,7 @@ import aiofiles
 import asyncio
 import uuid
 from mgz import const, header, summary
+from mgz.model import parse_match
 from utils.extract_datetime import extract_datetime_from_filename
 
 CIVILIZATION_NAMES = {
@@ -673,6 +674,154 @@ def _parse_header_only_bytes(replay_path, file_bytes, parse_error):
     return stats
 
 
+def _safe_match_position(position_obj):
+    if position_obj is None:
+        return None
+    try:
+        x = getattr(position_obj, "x", None)
+        y = getattr(position_obj, "y", None)
+        if x is None or y is None:
+            return None
+        return [float(x), float(y)]
+    except Exception:
+        return None
+
+
+def _safe_match_team_id(team_id):
+    if team_id is None:
+        return None
+    try:
+        if isinstance(team_id, (set, frozenset, list, tuple)):
+            values = [int(value) for value in team_id]
+            return min(values) if values else None
+        return int(team_id)
+    except Exception:
+        return None
+
+
+def _parse_match_live_fallback_bytes(replay_path, file_bytes, parse_error):
+    try:
+        match = parse_match(io.BytesIO(file_bytes))
+    except Exception as fallback_error:
+        logging.error(f"❌ parse_match live fallback failed: {fallback_error}")
+        return None
+
+    raw_players = list(getattr(match, "players", []) or [])
+    players = []
+
+    for raw_player in raw_players:
+        civilization_id = _safe_int(getattr(raw_player, "civilization_id", None))
+        player = {
+            "name": getattr(raw_player, "name", None) or "Unknown",
+            "number": _safe_int(getattr(raw_player, "number", None)),
+            "civilization": civilization_id,
+            "civilization_name": getattr(raw_player, "civilization", None)
+            or _normalize_civilization_name(civilization_id),
+            "winner": bool(getattr(raw_player, "winner", False)),
+            "score": None,
+            "user_id": None,
+            "steam_id": None,
+            "steam_rm_rating": None,
+            "steam_dm_rating": None,
+            "rate_snapshot": _normalize_rating(getattr(raw_player, "rate_snapshot", None)),
+            "eapm": _normalize_rating(getattr(raw_player, "eapm", None)),
+            "position": _safe_match_position(getattr(raw_player, "position", None)),
+            "color_id": _normalize_rating(getattr(raw_player, "color_id", None)),
+            "team_id": _safe_match_team_id(getattr(raw_player, "team_id", None)),
+            "human": True,
+            "prefer_random": getattr(raw_player, "prefer_random", None),
+            "mvp": None,
+            "cheater": False,
+            "live_fallback": True,
+        }
+        players.append(player)
+
+    duration_obj = getattr(match, "duration", None)
+    try:
+        duration_seconds = int(duration_obj.total_seconds()) if duration_obj is not None else 0
+    except Exception:
+        duration_seconds = 0
+
+    raw_map = getattr(match, "map", None)
+    map_name = getattr(raw_map, "name", None) if raw_map is not None else None
+    if not map_name and raw_map is not None:
+        map_name = str(raw_map)
+
+    completed = bool(getattr(match, "completed", False))
+    winner = next((player["name"] for player in players if player.get("winner")), None)
+
+    action_types = []
+    seen_action_types = set()
+    for action in list(getattr(match, "actions", []) or [])[:5000]:
+        action_type = getattr(action, "type", None)
+        label = getattr(action_type, "name", None) or str(action_type or "")
+        label = label.replace("Action.", "").lower()
+        if not label or label in seen_action_types:
+            continue
+        seen_action_types.add(label)
+        action_types.append(label)
+
+    file_info = getattr(match, "file", None)
+    dt = extract_datetime_from_filename(replay_path)
+
+    stats = {
+        "game_version": str(getattr(match, "version", "Unknown")),
+        "map": {
+            "name": map_name or "Unknown",
+            "size": "Unknown",
+        },
+        "game_type": str(getattr(match, "type", None) or getattr(match, "game_version", None) or "Unknown"),
+        "duration": duration_seconds,
+        "game_duration": duration_seconds,
+        "players": players,
+        "winner": winner or "Unknown",
+        "event_types": action_types,
+        "key_events": {
+            "completed": completed,
+            "parse_match_live_fallback": True,
+            "summary_parse_error": str(parse_error)[:240],
+            "postgame_available": False,
+            "has_scores": False,
+            "has_achievements": False,
+            "player_score_count": 0,
+            "achievement_player_count": 0,
+            "achievement_shell_count": 0,
+            "has_achievement_shell": False,
+            "platform_id": "hd",
+            "dataset": getattr(match, "dataset", None),
+            "dataset_id": getattr(match, "dataset_id", None),
+            "game_version": getattr(match, "game_version", None),
+            "type": getattr(match, "type", None),
+            "type_id": getattr(match, "type_id", None),
+            "speed": getattr(match, "speed", None),
+            "speed_id": getattr(match, "speed_id", None),
+            "difficulty": getattr(match, "difficulty", None),
+            "difficulty_id": getattr(match, "difficulty_id", None),
+            "population_limit": getattr(match, "population", None),
+            "map_reveal_choice": getattr(match, "map_reveal", None),
+            "lock_teams": getattr(match, "lock_teams", None),
+            "cheats": getattr(match, "cheats", None),
+            "rated": getattr(match, "rated", None),
+            "restored": bool(getattr(match, "restored", False)),
+            "duration_source": "mgz_parse_match_timedelta",
+            "file_language": getattr(file_info, "language", None) if file_info is not None else None,
+            "file_size": getattr(file_info, "size", None) if file_info is not None else None,
+            "perspective_player_name": str(getattr(file_info, "perspective", "")) if file_info is not None else None,
+        },
+        "completed": completed,
+        "disconnect_detected": False,
+        "parse_reason": "hd_live_parse_match_fallback",
+        "played_on": dt.isoformat() if dt else None,
+    }
+
+    logging.warning(
+        "⚠️ parse_match live fallback used for %s after summary parse failed: %s",
+        replay_path,
+        parse_error,
+    )
+    return stats
+
+
 def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
     try:
         h = header.parse(file_bytes)
@@ -809,6 +958,12 @@ def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
 
     except Exception as e:
         logging.error(f"❌ sync parse error: {e}")
+        live_fallback = _parse_match_live_fallback_bytes(replay_path, file_bytes, e)
+        if live_fallback:
+            if apply_hd_early_exit_rules:
+                live_fallback["parse_reason"] = "hd_final_parse_match_fallback"
+                live_fallback.setdefault("key_events", {})["parse_match_final_fallback"] = True
+            return live_fallback
         return _parse_header_only_bytes(replay_path, file_bytes, e)
 
 # ───────────────────────────────────────────────

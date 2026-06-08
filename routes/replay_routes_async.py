@@ -1000,6 +1000,7 @@ async def upload_replay_file(
                         "completed": False,
                         "live_pending_parse": True,
                     }
+
                     existing_placeholder_live = await _load_existing_placeholder_live_game(
                         db,
                         uploader_uid,
@@ -1246,7 +1247,24 @@ async def upload_replay_file(
                 parse_reason = inferred_outcome["parse_reason"]
                 key_events = inferred_outcome["key_events"]
 
-            if is_final_upload and not _has_reliable_final_signal(parsed, inferred_outcome):
+            parse_match_fallback_has_match_identity = (
+                isinstance(parsed, dict)
+                and parsed.get("parse_reason") in {
+                    "hd_live_parse_match_fallback",
+                    "hd_final_parse_match_fallback",
+                }
+                and isinstance(players, list)
+                and len(players) >= 2
+                and isinstance(map_payload, dict)
+                and map_payload.get("name")
+                and map_payload.get("name") != "Unknown"
+            )
+
+            if (
+                is_final_upload
+                and not parse_match_fallback_has_match_identity
+                and not _has_reliable_final_signal(parsed, inferred_outcome)
+            ):
                 await _record_parse_attempt(
                     db,
                     user_uid=uploader_uid,
