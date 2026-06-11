@@ -174,8 +174,8 @@ def test_has_reliable_final_signal_rejects_paused_unknown_replay():
     )
 
 
-def test_has_reliable_final_signal_accepts_header_only_fallback_with_players():
-    assert _has_reliable_final_signal(
+def test_has_reliable_final_signal_rejects_header_only_fallback_with_players():
+    assert not _has_reliable_final_signal(
         {
             "winner": "Unknown",
             "players": [
