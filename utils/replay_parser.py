@@ -294,31 +294,56 @@ def _normalize_mgz_duration_seconds(value):
     return max(1, int(math.ceil(numeric / 1000.0)))
 
 
+MAX_CHAT_TRANSCRIPT_LINES = 500
+
+
+def _normalize_chat_entry(raw_entry, line_no=None):
+    if not isinstance(raw_entry, dict):
+        return None
+
+    timestamp = raw_entry.get("timestamp")
+    timestamp_seconds = _normalize_mgz_duration_seconds(timestamp)
+
+    message = raw_entry.get("message")
+    entry = {
+        "timestamp_seconds": timestamp_seconds,
+        "origination": str(raw_entry.get("origination") or "").strip() or None,
+        "type": getattr(raw_entry.get("type"), "name", str(raw_entry.get("type") or "")).lower() or None,
+        "player_number": _normalize_rating(raw_entry.get("player_number")),
+        "message": str(message).strip() if isinstance(message, str) and message.strip() else None,
+        "audience": str(raw_entry.get("audience") or "").strip() or None,
+    }
+
+    if line_no is not None:
+        entry["line_no"] = line_no
+
+    return entry if _has_meaningful_value(entry) else None
+
+
 def _extract_chat_preview(chat):
     if not isinstance(chat, list) or not chat:
         return []
 
     preview = []
     for raw_entry in chat[-5:]:
-        if not isinstance(raw_entry, dict):
-            continue
+        entry = _normalize_chat_entry(raw_entry)
+        if entry:
+            preview.append(entry)
 
-        timestamp = raw_entry.get("timestamp")
-        timestamp_seconds = _normalize_mgz_duration_seconds(timestamp)
+    return preview
 
-        message = raw_entry.get("message")
-        preview.append(
-            {
-                "timestamp_seconds": timestamp_seconds,
-                "origination": str(raw_entry.get("origination") or "").strip() or None,
-                "type": getattr(raw_entry.get("type"), "name", str(raw_entry.get("type") or "")).lower() or None,
-                "player_number": _normalize_rating(raw_entry.get("player_number")),
-                "message": str(message).strip() if isinstance(message, str) and message.strip() else None,
-                "audience": str(raw_entry.get("audience") or "").strip() or None,
-            }
-        )
 
-    return [entry for entry in preview if _has_meaningful_value(entry)]
+def _extract_chat_transcript(chat, max_lines=MAX_CHAT_TRANSCRIPT_LINES):
+    if not isinstance(chat, list) or not chat:
+        return []
+
+    transcript = []
+    for index, raw_entry in enumerate(chat[:max_lines], start=1):
+        entry = _normalize_chat_entry(raw_entry, line_no=index)
+        if entry:
+            transcript.append(entry)
+
+    return transcript
 
 
 def _count_players_with_visible_scores(players):
@@ -945,6 +970,13 @@ def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
         chat_preview = _extract_chat_preview(chat)
         if chat_preview:
             stats["key_events"]["chat_preview"] = chat_preview
+
+        chat_transcript = _extract_chat_transcript(chat)
+        if chat_transcript:
+            stats["key_events"]["chat_transcript"] = chat_transcript
+            stats["key_events"]["chat_transcript_count"] = len(chat_transcript)
+            stats["key_events"]["chat_transcript_truncated"] = len(chat) > len(chat_transcript)
+
         stats["completed"] = completed
         stats["disconnect_detected"] = not completed and len(resigned_player_numbers) == 0
         stats = _apply_completion_metadata(stats)
