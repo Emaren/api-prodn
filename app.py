@@ -1,6 +1,6 @@
 # app.py
 from datetime import datetime
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.future import select
@@ -29,6 +29,10 @@ from routes import (
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("aoe2hdbets.api")
+
+_GAME_STATS_CACHE_TTL_SECONDS = float(os.getenv("AOE2_GAME_STATS_CACHE_TTL_SECONDS", "90"))
+_GAME_STATS_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
 
 
 def _read_platform_match_id(game: GameStats) -> str | None:
@@ -143,7 +147,17 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/api/game_stats")
-async def get_game_stats(db_gen=Depends(get_db)):
+async def get_game_stats(
+    limit: int | None = Query(default=None, ge=1, le=5000),
+    db_gen=Depends(get_db),
+):
+    cache_key = f"limit:{limit or 'all'}"
+    now = time.monotonic()
+    cached = _GAME_STATS_CACHE.get(cache_key)
+
+    if cached and cached[0] > now:
+        return cached[1]
+
     try:
         async with db_gen as db:
             result = await db.execute(
@@ -165,10 +179,26 @@ async def get_game_stats(db_gen=Depends(get_db)):
                 reverse=True,
             )
 
-            logging.getLogger(__name__).info(
-                f"📊 Returning {len(unique_games)} unique games from DB"
+            selected_games = ordered_games[:limit] if limit else ordered_games
+            payload = [g.to_dict() for g in selected_games]
+
+            _GAME_STATS_CACHE[cache_key] = (
+                time.monotonic() + _GAME_STATS_CACHE_TTL_SECONDS,
+                payload,
             )
-            return [g.to_dict() for g in ordered_games]
+
+            if len(_GAME_STATS_CACHE) > 12:
+                stale_keys = [
+                    key for key, value in _GAME_STATS_CACHE.items()
+                    if value[0] <= time.monotonic()
+                ]
+                for key in stale_keys:
+                    _GAME_STATS_CACHE.pop(key, None)
+
+            logging.getLogger(__name__).info(
+                f"📊 Returning {len(payload)} of {len(unique_games)} unique games from DB"
+            )
+            return payload
     except Exception as e:
         logging.error(f"❌ Failed to fetch game stats: {e}", exc_info=True)
         return []
