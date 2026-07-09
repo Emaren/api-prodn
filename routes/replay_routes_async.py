@@ -5,6 +5,7 @@ from db.db import get_db
 from datetime import datetime
 import logging
 import os
+import shutil
 from typing import Optional, Tuple
 from pathlib import Path
 import tempfile
@@ -30,6 +31,7 @@ router = APIRouter(prefix="/api", tags=["replay"])
 
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")  # optional; if set, enforces auth for uploads
 MAX_REPLAY_UPLOAD_BYTES = int(os.getenv("MAX_REPLAY_UPLOAD_BYTES", str(250 * 1024 * 1024)))
+REPLAY_ARCHIVE_DIR = Path(os.getenv("REPLAY_ARCHIVE_DIR", "/mnt/HC_Volume_105319120/aoe2-replay-archive"))
 SUPERSEDED_PARSE_REASON = "superseded_by_later_upload"
 PLACEHOLDER_LIVE_PARSE_REASON = "watcher_live_pending_parse"
 UNPARSED_FINAL_PARSE_REASON = "watcher_final_unparsed"
@@ -44,6 +46,48 @@ FINALITY_REVIEWED_MATCH_DUPLICATE = "reviewed_match_duplicate"
 FINALITY_REVIEWED_MATCH_REFRESHED = "reviewed_match_refreshed"
 
 WATCHER_KEY_RE = re.compile(r"^wolo_([a-f0-9]{12})_(.+)$", re.IGNORECASE)
+
+REPLAY_ARCHIVE_SUFFIXES = {".aoe2record", ".aoe2mpgame", ".mgz", ".mgx", ".mgl"}
+
+
+def _archive_uploaded_replay(
+    temp_path: str,
+    replay_hash: Optional[str],
+    original_name: Optional[str],
+    file_size_bytes: int,
+) -> Optional[str]:
+    """
+    Keep the raw replay bytes permanently so parser fixes can backfill old proof rows.
+
+    The upload temp file is deleted at the end of the request, so this must run
+    immediately after the hash is known and before any duplicate/fallback return path.
+    """
+    if not replay_hash:
+        return None
+
+    source = Path(temp_path)
+    if not source.exists():
+        return None
+
+    suffix = Path(original_name or "").suffix.lower()
+    if suffix not in REPLAY_ARCHIVE_SUFFIXES:
+        suffix = ".aoe2record"
+
+    safe_hash = re.sub(r"[^a-fA-F0-9]", "", str(replay_hash)).lower()
+    if len(safe_hash) < 16:
+        return None
+
+    target_dir = REPLAY_ARCHIVE_DIR / safe_hash[:2] / safe_hash[2:4]
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    target = target_dir / f"{safe_hash}{suffix}"
+    expected_size = int(file_size_bytes or 0)
+
+    if target.exists() and (expected_size <= 0 or target.stat().st_size == expected_size):
+        return str(target)
+
+    shutil.copy2(source, target)
+    return str(target)
 
 
 async def require_internal_key(
@@ -1065,6 +1109,12 @@ async def upload_replay_file(
 
     try:
         replay_hash = await hash_replay_file(temp_path)
+        raw_replay_archive_path = _archive_uploaded_replay(
+            temp_path,
+            replay_hash,
+            original_name,
+            written,
+        )
         if not replay_hash:
             raise HTTPException(status_code=500, detail="Failed to hash replay file")
 
@@ -1211,7 +1261,7 @@ async def upload_replay_file(
                             original_filename=original_name,
                             parse_source=parse_source,
                             status="duplicate_unparsed_final",
-                            detail="Watcher final replay is already preserved as an unparsed proof row.",
+                            detail="Watcher final proof row already exists; raw replay archived for future parser backfill.",
                             upload_mode=mode,
                             file_size_bytes=written,
                             game_stats_id=existing_final_game.id,
@@ -1220,7 +1270,7 @@ async def upload_replay_file(
                         await db.commit()
                         return _finality_response(
                             {
-                                "message": "Watcher final replay already preserved as unparsed proof.",
+                                "message": "Watcher final proof row already exists; raw replay archived for future parser backfill.",
                                 "replay_hash": replay_hash,
                                 "uploader_uid": uploader_uid,
                                 "upload_mode": mode,
