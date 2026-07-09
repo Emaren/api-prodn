@@ -77,17 +77,27 @@ def _archive_uploaded_replay(
     if len(safe_hash) < 16:
         return None
 
-    target_dir = REPLAY_ARCHIVE_DIR / safe_hash[:2] / safe_hash[2:4]
-    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir = REPLAY_ARCHIVE_DIR / safe_hash[:2] / safe_hash[2:4]
+        target_dir.mkdir(parents=True, exist_ok=True)
 
-    target = target_dir / f"{safe_hash}{suffix}"
-    expected_size = int(file_size_bytes or 0)
+        target = target_dir / f"{safe_hash}{suffix}"
+        expected_size = int(file_size_bytes or 0)
 
-    if target.exists() and (expected_size <= 0 or target.stat().st_size == expected_size):
+        if target.exists() and (expected_size <= 0 or target.stat().st_size == expected_size):
+            return str(target)
+
+        shutil.copy2(source, target)
         return str(target)
-
-    shutil.copy2(source, target)
-    return str(target)
+    except OSError as error:
+        logging.warning(
+            "Replay raw archive failed for hash=%s name=%s path=%s: %s",
+            safe_hash,
+            original_name,
+            str(REPLAY_ARCHIVE_DIR),
+            error,
+        )
+        return None
 
 
 async def require_internal_key(
