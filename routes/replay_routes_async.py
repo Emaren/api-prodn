@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import base64
 import re
-from sqlalchemy import text, update
+from sqlalchemy import or_, text, update
 
 # Prefer full model set if present (User/ApiKey added in recent migration)
 try:
@@ -815,6 +815,33 @@ def _should_upgrade_duplicate_final(
         return True
 
     return False
+
+
+def _split_previous_version_supersession(previous_version_rows, non_final_hashes):
+    """
+    The DB allows one final and one non-final row per replay_hash.
+
+    When a later final upload supersedes older finals for the same original filename,
+    demoting an older final to non-final can collide with the already-stored live row
+    for that same hash. In that case, keep the older final row as final but mark its
+    parse_reason as superseded so it is excluded from future supersession passes.
+    """
+    non_final_hashes = {str(value) for value in (non_final_hashes or []) if value}
+    demote_ids = []
+    mark_only_ids = []
+
+    for row in previous_version_rows or []:
+        row_id = getattr(row, "id", None)
+        replay_hash = getattr(row, "replay_hash", None)
+        if row_id is None:
+            continue
+
+        if replay_hash and str(replay_hash) in non_final_hashes:
+            mark_only_ids.append(row_id)
+        else:
+            demote_ids.append(row_id)
+
+    return demote_ids, mark_only_ids
 
 
 def _should_refresh_reviewed_match(
@@ -1687,17 +1714,21 @@ async def upload_replay_file(
                         finality_status=FINALITY_LIVE,
                     )
 
-            previous_versions = []
+            previous_version_rows = []
             if is_final_upload and original_name and uploader_uid and uploader_uid != "system":
                 prior = await db.execute(
                     select(GameStats.id, GameStats.replay_hash).where(
                         GameStats.user_uid == uploader_uid,
                         GameStats.original_filename == original_name,
                         GameStats.is_final.is_(True),
+                        or_(
+                            GameStats.parse_reason.is_(None),
+                            GameStats.parse_reason != SUPERSEDED_PARSE_REASON,
+                        ),
                     )
                 )
-                previous_versions = [
-                    row.id
+                previous_version_rows = [
+                    row
                     for row in prior
                     if row.replay_hash != replay_hash
                 ]
@@ -1726,15 +1757,47 @@ async def upload_replay_file(
             db.add(game)
             await db.flush()
 
-            if is_final_upload and previous_versions:
-                await db.execute(
-                    update(GameStats)
-                    .where(GameStats.id.in_(previous_versions))
-                    .values(
-                        is_final=False,
-                        parse_reason=SUPERSEDED_PARSE_REASON,
+            if is_final_upload and previous_version_rows:
+                previous_hashes = [
+                    row.replay_hash
+                    for row in previous_version_rows
+                    if row.replay_hash
+                ]
+                non_final_hashes = set()
+                if previous_hashes:
+                    non_final_result = await db.execute(
+                        select(GameStats.replay_hash).where(
+                            GameStats.replay_hash.in_(previous_hashes),
+                            GameStats.is_final.is_(False),
+                        )
                     )
+                    non_final_hashes = {
+                        row.replay_hash
+                        for row in non_final_result
+                        if row.replay_hash
+                    }
+
+                demote_ids, mark_only_ids = _split_previous_version_supersession(
+                    previous_version_rows,
+                    non_final_hashes,
                 )
+
+                if demote_ids:
+                    await db.execute(
+                        update(GameStats)
+                        .where(GameStats.id.in_(demote_ids))
+                        .values(
+                            is_final=False,
+                            parse_reason=SUPERSEDED_PARSE_REASON,
+                        )
+                    )
+
+                if mark_only_ids:
+                    await db.execute(
+                        update(GameStats)
+                        .where(GameStats.id.in_(mark_only_ids))
+                        .values(parse_reason=SUPERSEDED_PARSE_REASON)
+                    )
 
             # Auto-verify when upload is proof-tied (watcher) or trusted (internal + x-user-uid)
             if is_final_upload and uploader_uid and uploader_uid != "system":

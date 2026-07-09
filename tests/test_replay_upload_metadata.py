@@ -16,6 +16,7 @@ from routes.replay_routes_async import (
     _parse_positive_int_header,
     _should_upgrade_duplicate_final,
     _should_refresh_reviewed_match,
+    _split_previous_version_supersession,
 )
 
 
@@ -354,6 +355,22 @@ def test_should_upgrade_duplicate_final_when_achievement_shell_count_improves():
             "achievement_shell_count": 2,
         },
     )
+
+
+def test_split_previous_version_supersession_keeps_final_when_live_shell_exists():
+    rows = [
+        SimpleNamespace(id=10, replay_hash="old-live-hash"),
+        SimpleNamespace(id=11, replay_hash="old-final-only-hash"),
+        SimpleNamespace(id=12, replay_hash=None),
+    ]
+
+    demote_ids, mark_only_ids = _split_previous_version_supersession(
+        rows,
+        {"old-live-hash"},
+    )
+
+    assert demote_ids == [11, 12]
+    assert mark_only_ids == [10]
 
 
 def test_should_refresh_reviewed_match_when_later_final_is_much_longer():
