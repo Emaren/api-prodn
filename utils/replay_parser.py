@@ -12,6 +12,113 @@ from mgz import const, header, summary
 from mgz.model import parse_match
 from utils.extract_datetime import extract_datetime_from_filename
 
+
+MGZ_HD_TYPE9_GAME_TYPE_LABEL = "TurboRandom9"
+_MGZ_HD_TYPE9_PATCHED = False
+
+
+def _patch_mgz_hd_type9_game_type():
+    """
+    AoE2 HD can emit lobby game_type_id=9 for Turbo Random-style custom-map games.
+
+    mgz 1.8.27 knows TurboRandom=8 but not 9. Without this compatibility shim,
+    header.parse/summary.Summary fail with:
+        no decoding mapping for 9 (parsing) -> lobby
+
+    Patch only Construct Enum maps that already look like game-type enums.
+    """
+    global _MGZ_HD_TYPE9_PATCHED
+
+    if _MGZ_HD_TYPE9_PATCHED:
+        return
+
+    patched = 0
+    seen = set()
+
+    def looks_like_game_type_enum(decoding, encoding):
+        labels = set()
+
+        if isinstance(decoding, dict):
+            labels.update(str(value) for value in decoding.values())
+
+        if isinstance(encoding, dict):
+            labels.update(str(key) for key in encoding.keys())
+
+        return (
+            "TurboRandom" in labels
+            and (
+                {"RM", "DM"}.issubset(labels)
+                or "CaptureTheRelic" in labels
+                or "SuddenDeath" in labels
+            )
+        )
+
+    def visit(obj, depth=0):
+        nonlocal patched
+
+        if depth > 18:
+            return
+
+        ident = id(obj)
+        if ident in seen:
+            return
+        seen.add(ident)
+
+        for decode_attr, encode_attr in [
+            ("decoding", "encoding"),
+            ("decmapping", "encmapping"),
+            ("_decode_mapping", "_encode_mapping"),
+        ]:
+            decoding = getattr(obj, decode_attr, None)
+            encoding = getattr(obj, encode_attr, None)
+
+            if not looks_like_game_type_enum(decoding, encoding):
+                continue
+
+            if isinstance(decoding, dict) and 9 not in decoding:
+                decoding[9] = MGZ_HD_TYPE9_GAME_TYPE_LABEL
+                patched += 1
+
+            if isinstance(encoding, dict) and MGZ_HD_TYPE9_GAME_TYPE_LABEL not in encoding:
+                encoding[MGZ_HD_TYPE9_GAME_TYPE_LABEL] = 9
+                patched += 1
+
+        for name in [
+            "subcon", "subcons", "cases", "case", "default", "mapping",
+            "selector", "thenfield", "elsefield", "fields", "items",
+        ]:
+            try:
+                child = getattr(obj, name)
+            except Exception:
+                continue
+
+            if isinstance(child, (str, bytes, int, float, bool, type(None))):
+                continue
+
+            visit(child, depth + 1)
+
+        if isinstance(obj, dict):
+            for child in list(obj.values()):
+                if not isinstance(child, (str, bytes, int, float, bool, type(None))):
+                    visit(child, depth + 1)
+
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            for child in list(obj):
+                if not isinstance(child, (str, bytes, int, float, bool, type(None))):
+                    visit(child, depth + 1)
+
+    try:
+        visit(header)
+        if patched:
+            logging.info(
+                "✅ patched mgz HD game_type_id=9 compatibility maps: %s",
+                patched,
+            )
+    except Exception as error:
+        logging.warning("⚠️ failed to patch mgz HD game_type_id=9 compatibility: %s", error)
+
+    _MGZ_HD_TYPE9_PATCHED = True
+
 CIVILIZATION_NAMES = {
     1: "Britons",
     2: "Franks",
@@ -848,6 +955,7 @@ def _parse_match_live_fallback_bytes(replay_path, file_bytes, parse_error):
 
 
 def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
+    _patch_mgz_hd_type9_game_type()
     try:
         h = header.parse(file_bytes)
         s = summary.Summary(io.BytesIO(file_bytes))
