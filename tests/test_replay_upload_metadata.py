@@ -30,6 +30,42 @@ def test_finality_response_exposes_retry_and_completeness_contract():
     assert live["should_continue_monitoring"] is True
     assert live["betting_eligible"] is False
 
+    unresolved_team_final = _finality_response(
+        {
+            "is_final": True,
+            "players_count": 8,
+            "winner": "Jim",
+            "team_resolution": {
+                "status": "incomplete",
+                "confidence": "low",
+                "team_count": 0,
+                "winning_team_id": None,
+            },
+        },
+        finality_status="trusted_final",
+        should_settle=True,
+    )
+    assert unresolved_team_final["has_reliable_teams"] is False
+    assert unresolved_team_final["betting_eligible"] is False
+
+    resolved_team_final = _finality_response(
+        {
+            "is_final": True,
+            "players_count": 8,
+            "winner": "Jim",
+            "team_resolution": {
+                "status": "resolved",
+                "confidence": "high",
+                "team_count": 2,
+                "winning_team_id": 0,
+            },
+        },
+        finality_status="trusted_final",
+        should_settle=True,
+    )
+    assert resolved_team_final["has_coherent_winning_team"] is True
+    assert resolved_team_final["betting_eligible"] is True
+
     final = _finality_response(
         {"is_final": True, "players_count": 2, "winner": "Player One"},
         finality_status="trusted_final",

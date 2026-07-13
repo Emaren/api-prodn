@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover
 
 from utils.replay_parser import parse_replay_full, hash_replay_file
 from utils.extract_datetime import extract_datetime_from_filename
+from utils.replay_team_contract import canonicalize_replay_players, resolve_replay_teams
 
 router = APIRouter(prefix="/api", tags=["replay"])
 
@@ -211,6 +212,18 @@ def _finality_response(
     winner = str(payload.get("winner") or "Unknown").strip()
     has_reliable_winner = winner.lower() not in {"", "unknown", "none", "null"}
     final_accepted = bool(is_final and should_settle)
+    team_resolution = (
+        payload.get("team_resolution")
+        if isinstance(payload.get("team_resolution"), dict)
+        else {}
+    )
+    is_team_game = player_count > 2
+    has_reliable_teams = not is_team_game or (
+        team_resolution.get("status") == "resolved"
+        and team_resolution.get("confidence") == "high"
+        and int(team_resolution.get("team_count") or 0) == 2
+    )
+    has_coherent_winning_team = not is_team_game or team_resolution.get("winning_team_id") is not None
     if finality_status == FINALITY_FINAL_UNPARSED_PROOF:
         completeness = "final_unparsed_proof"
     elif is_final and final_accepted and has_reliable_winner:
@@ -233,8 +246,15 @@ def _finality_response(
         "should_retry": bool(pending_parse or finality_status == FINALITY_FINAL_NOT_READY),
         "parse_completeness": completeness,
         "has_reliable_roster": player_count >= 2,
+        "has_reliable_teams": has_reliable_teams,
+        "has_coherent_winning_team": has_coherent_winning_team,
         "has_reliable_winner": has_reliable_winner,
-        "betting_eligible": final_accepted and has_reliable_winner,
+        "betting_eligible": (
+            final_accepted
+            and has_reliable_winner
+            and has_reliable_teams
+            and has_coherent_winning_team
+        ),
         "stats_eligible": final_accepted and has_reliable_winner,
         "safe_public_status": (
             "Final accepted"
@@ -244,6 +264,14 @@ def _finality_response(
             else "Live replay received"
         ),
     }
+
+
+def _apply_route_team_contract(players: list, key_events: dict, *, final: bool):
+    canonical_players = canonicalize_replay_players(players)
+    resolution = resolve_replay_teams(canonical_players, final=final)
+    canonical_key_events = dict(key_events) if isinstance(key_events, dict) else {}
+    canonical_key_events["team_resolution"] = resolution
+    return canonical_players, canonical_key_events, resolution
 
 
 def _watcher_upload_metadata(
@@ -1058,6 +1086,13 @@ async def parse_new_replay(
                 parse_reason = inferred_outcome["parse_reason"]
                 key_events = inferred_outcome["key_events"]
 
+        players, key_events, _team_resolution = _apply_route_team_contract(
+            players,
+            key_events,
+            final=bool(data.is_final),
+        )
+
+        if mode == "final" and data.is_final:
             existing = await db.execute(
                 select(GameStats).where(
                     GameStats.replay_hash == data.replay_hash,
@@ -1457,6 +1492,12 @@ async def upload_replay_file(
                 parse_reason = inferred_outcome["parse_reason"]
                 key_events = inferred_outcome["key_events"]
 
+            players, key_events, team_resolution = _apply_route_team_contract(
+                players,
+                key_events,
+                final=is_final_upload,
+            )
+
             if (
                 is_final_upload
                 and not _has_reliable_final_signal(parsed, inferred_outcome)
@@ -1484,6 +1525,7 @@ async def upload_replay_file(
                         "upload_mode": mode,
                         "parse_iteration": parse_iteration,
                         "is_final": True,
+                        "team_resolution": team_resolution,
                     },
                     finality_status=FINALITY_FINAL_NOT_READY,
                     should_settle=False,
@@ -1539,6 +1581,7 @@ async def upload_replay_file(
                             "upload_mode": mode,
                             "parse_iteration": parse_iteration,
                             "is_final": False,
+                            "team_resolution": team_resolution,
                         },
                         finality_status=FINALITY_LIVE,
                     )
@@ -1599,6 +1642,7 @@ async def upload_replay_file(
                             "upload_mode": mode,
                             "parse_iteration": parse_iteration,
                             "is_final": True,
+                            "team_resolution": team_resolution,
                         },
                         finality_status=FINALITY_TRUSTED_FINAL_REFRESHED,
                         should_settle=True,
@@ -1624,6 +1668,10 @@ async def upload_replay_file(
                         "replay_hash": replay_hash,
                         "uploader_uid": uploader_uid,
                         "upload_mode": mode,
+                        "players_count": len(players),
+                        "winner": winner,
+                        "is_final": True,
+                        "team_resolution": team_resolution,
                     },
                     finality_status=FINALITY_TRUSTED_FINAL_DUPLICATE,
                     should_settle=True,
@@ -1692,6 +1740,7 @@ async def upload_replay_file(
                                 "upload_mode": mode,
                                 "parse_iteration": parse_iteration,
                                 "is_final": True,
+                                "team_resolution": team_resolution,
                             },
                             finality_status=FINALITY_REVIEWED_MATCH_REFRESHED,
                             should_settle=True,
@@ -1718,6 +1767,10 @@ async def upload_replay_file(
                             "platform_match_id": platform_match_id,
                             "uploader_uid": uploader_uid,
                             "upload_mode": mode,
+                            "players_count": len(players),
+                            "winner": winner,
+                            "is_final": True,
+                            "team_resolution": team_resolution,
                         },
                         finality_status=FINALITY_REVIEWED_MATCH_DUPLICATE,
                         should_settle=True,
@@ -1776,6 +1829,7 @@ async def upload_replay_file(
                                 "upload_mode": mode,
                                 "parse_iteration": parse_iteration,
                                 "is_final": False,
+                                "team_resolution": team_resolution,
                             },
                             finality_status=FINALITY_LIVE,
                         )
@@ -1801,6 +1855,10 @@ async def upload_replay_file(
                             "uploader_uid": uploader_uid,
                             "upload_mode": mode,
                             "parse_iteration": existing_live_game.parse_iteration,
+                            "players_count": len(players),
+                            "winner": winner,
+                            "is_final": False,
+                            "team_resolution": team_resolution,
                         },
                         finality_status=FINALITY_LIVE,
                     )
@@ -1920,6 +1978,7 @@ async def upload_replay_file(
                 "upload_mode": mode,
                 "parse_iteration": parse_iteration,
                 "is_final": is_final_upload,
+                "team_resolution": team_resolution,
             },
             finality_status=FINALITY_TRUSTED_FINAL if is_final_upload else FINALITY_LIVE,
             should_settle=is_final_upload,

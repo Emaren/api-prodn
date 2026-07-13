@@ -6,6 +6,10 @@ Watcher responses expose `parse_completeness`, `finality_status`, `final_accepte
 
 Trusted finality—not HTTP success—allows settlement. Disconnect/desync evidence, parser failure, watcher interruption, and silent disappearance are distinct. Unsafe winners never become betting eligible. Missing postgame/achievement values remain absent rather than becoming zeroes.
 
+`utils/replay_team_contract.py` is the canonical replay-player boundary. It normalizes alternate parser names once and preserves replay-observed name, Steam ID, civilization, color, position, explicit team ID (including valid team `0`), player number, winner flag, score, rating snapshot, EAPM, and achievements when present. It never infers team membership from array order. Team games resolve only with exactly two complete equal-size explicit teams; a coherent team winner requires every winning-team flag true and every losing-team flag false. The resolution is stored in `key_events.team_resolution` and returned with finality metadata.
+
+Live/final iterations retain their own canonical player evidence in `game_stats`. The app-side session merger prefers complete identity/team fields, keeps earlier complete assignments when a later iteration is incomplete, and blocks conflicting assignments. Multiple watcher orderings are therefore harmless; conflicting team evidence is not. For a team final, `betting_eligible` additionally requires high-confidence teams and a coherent winning team.
+
 Identity precedence is platform match ID, watcher/session identity, normalized filename plus watcher session, then hash/fallback metadata. Parse attempts remain audit evidence while public views collapse iterations and duplicate watcher uploads into one canonical match.
 
 Fixture work belongs under `tests/`; private user replays are not committed. Coverage should include normal/resignation/disconnect finals, incomplete/live files, team games, repeated/multi-watcher iterations, corrupt/unsupported input, missing scoreboard, late finals, and batch duplicates.

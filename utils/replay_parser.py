@@ -11,6 +11,7 @@ import uuid
 from mgz import const, header, summary
 from mgz.model import parse_match
 from utils.extract_datetime import extract_datetime_from_filename
+from utils.replay_team_contract import apply_replay_team_contract
 
 
 MGZ_HD_TYPE9_GAME_TYPE_LABEL = "TurboRandom9"
@@ -166,12 +167,13 @@ async def parse_replay_full(replay_path, apply_hd_early_exit_rules=True):
             file_bytes = await f.read()
 
         # Use thread to safely run blocking mgz sync logic
-        return await asyncio.to_thread(
+        parsed = await asyncio.to_thread(
             _parse_sync_bytes,
             replay_path,
             file_bytes,
             apply_hd_early_exit_rules,
         )
+        return apply_replay_team_contract(parsed)
 
     except Exception as e:
         logging.error(f"❌ parse error: {e}")
