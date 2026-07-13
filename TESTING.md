@@ -1,5 +1,7 @@
 # api-prodn Testing
 
+Watcher ingestion changes run through the repository virtual environment’s `pytest` when available. `tests/test_replay_upload_metadata.py` is the hard metadata/finality response gate. Missing private replay fixtures remain a documented soft skip; never replace them with invented user data.
+
 ## Goal
 
 Keep this file brutally practical: how to run the backend safely, how to run tests, and what is currently broken or ambiguous.

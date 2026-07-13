@@ -5,6 +5,7 @@ from types import SimpleNamespace
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from routes.replay_routes_async import (
+    _finality_response,
     UNPARSED_FINAL_PARSE_REASON,
     _build_unparsed_watcher_final_payload,
     _derive_upload_parse_metadata,
@@ -18,6 +19,25 @@ from routes.replay_routes_async import (
     _should_refresh_reviewed_match,
     _split_previous_version_supersession,
 )
+
+
+def test_finality_response_exposes_retry_and_completeness_contract():
+    live = _finality_response(
+        {"is_final": False, "players_count": 8, "winner": "Unknown"},
+        finality_status="live",
+    )
+    assert live["parse_completeness"] == "live_roster"
+    assert live["should_continue_monitoring"] is True
+    assert live["betting_eligible"] is False
+
+    final = _finality_response(
+        {"is_final": True, "players_count": 2, "winner": "Player One"},
+        finality_status="trusted_final",
+        should_settle=True,
+    )
+    assert final["final_accepted"] is True
+    assert final["should_continue_monitoring"] is False
+    assert final["betting_eligible"] is True
 
 
 def test_parse_bool_header_understands_live_and_final_flags():

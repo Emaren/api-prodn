@@ -206,12 +206,43 @@ def _finality_response(
     pending_parse: bool = False,
     unparsed_final: bool = False,
 ):
+    is_final = bool(payload.get("is_final"))
+    player_count = int(payload.get("players_count") or 0)
+    winner = str(payload.get("winner") or "Unknown").strip()
+    has_reliable_winner = winner.lower() not in {"", "unknown", "none", "null"}
+    final_accepted = bool(is_final and should_settle)
+    if finality_status == FINALITY_FINAL_UNPARSED_PROOF:
+        completeness = "final_unparsed_proof"
+    elif is_final and final_accepted and has_reliable_winner:
+        completeness = "final_result_only"
+    elif is_final and not has_reliable_winner:
+        completeness = "final_unsafe"
+    elif not is_final and player_count >= 2:
+        completeness = "live_roster"
+    else:
+        completeness = "live_header"
+
     return {
         **payload,
         "finality_status": finality_status,
         "should_settle": bool(should_settle),
         "pending_parse": bool(pending_parse),
         "unparsed_final": bool(unparsed_final),
+        "final_accepted": final_accepted,
+        "should_continue_monitoring": not final_accepted,
+        "should_retry": bool(pending_parse or finality_status == FINALITY_FINAL_NOT_READY),
+        "parse_completeness": completeness,
+        "has_reliable_roster": player_count >= 2,
+        "has_reliable_winner": has_reliable_winner,
+        "betting_eligible": final_accepted and has_reliable_winner,
+        "stats_eligible": final_accepted and has_reliable_winner,
+        "safe_public_status": (
+            "Final accepted"
+            if final_accepted
+            else "Final proof stored; result under review"
+            if is_final
+            else "Live replay received"
+        ),
     }
 
 

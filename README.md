@@ -1,5 +1,15 @@
 # api-prodn
 
+## Replay completeness and finality contract
+
+Watcher responses expose `parse_completeness`, `finality_status`, `final_accepted`, `should_continue_monitoring`, `should_retry`, roster/winner reliability, betting/stats eligibility, and safe public status. Classes are `live_header`, `live_roster`, `final_result_only`, `final_unparsed_proof`, and `final_unsafe`.
+
+Trusted finality—not HTTP success—allows settlement. Disconnect/desync evidence, parser failure, watcher interruption, and silent disappearance are distinct. Unsafe winners never become betting eligible. Missing postgame/achievement values remain absent rather than becoming zeroes.
+
+Identity precedence is platform match ID, watcher/session identity, normalized filename plus watcher session, then hash/fallback metadata. Parse attempts remain audit evidence while public views collapse iterations and duplicate watcher uploads into one canonical match.
+
+Fixture work belongs under `tests/`; private user replays are not committed. Coverage should include normal/resignation/disconnect finals, incomplete/live files, team games, repeated/multi-watcher iterations, corrupt/unsupported input, missing scoreboard, late finals, and batch duplicates.
+
 Production FastAPI backend for AoE2HDBets.
 
 ## Canonical docs
