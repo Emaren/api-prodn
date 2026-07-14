@@ -125,7 +125,115 @@ def _stable_player_key(player: dict) -> str:
     return f"name:{str(player.get('name') or '').casefold()}"
 
 
-def resolve_replay_teams(values: Any, *, final: bool = False) -> dict:
+def _result_resolution(
+    players: list[dict],
+    teams: list[dict],
+    winning_team_id: Any,
+    key_events: Any,
+) -> dict:
+    """Describe result truth separately from lobby/team truth.
+
+    ``mgz`` winner flags are useful evidence, but in an HD team game they can be
+    inferred after the first resignation.  They are therefore enough to expose a
+    coherent result candidate, but not enough on their own to authorize money.
+    A postgame table, scoreboard payload, or resignation by every member of the
+    losing team upgrades that candidate to trusted result proof.
+    """
+    events = key_events if isinstance(key_events, dict) else {}
+    player_by_key = {_stable_player_key(player): player for player in players}
+    winning_team = next(
+        (team for team in teams if team.get("team_id") == winning_team_id),
+        None,
+    )
+    winning_player_keys = list(winning_team.get("player_keys") or []) if winning_team else []
+    winning_player_names = list(winning_team.get("players") or []) if winning_team else []
+
+    losing_player_keys = [
+        player_key
+        for team in teams
+        if team.get("team_id") != winning_team_id
+        for player_key in team.get("player_keys") or []
+    ] if winning_team else []
+    losing_players = [player_by_key[key] for key in losing_player_keys if key in player_by_key]
+
+    resigned_numbers = {
+        _integer(value)
+        for value in events.get("resigned_player_numbers", [])
+        if _integer(value) is not None
+    }
+    resigned_names = {
+        str(value).casefold()
+        for value in events.get("resigned_player_names", [])
+        if isinstance(value, str) and value.strip()
+    }
+
+    def player_resigned(player: dict) -> bool:
+        number = _integer(player.get("number"))
+        name = str(player.get("name") or "").casefold()
+        return (number is not None and number in resigned_numbers) or (
+            bool(name) and name in resigned_names
+        )
+
+    complete_losing_team_resignation = bool(losing_players) and all(
+        player_resigned(player) for player in losing_players
+    )
+    postgame_available = bool(events.get("postgame_available"))
+    scoreboard_available = bool(
+        events.get("has_scores")
+        or events.get("has_achievements")
+        or _integer(events.get("player_score_count"))
+        or _integer(events.get("achievement_player_count"))
+    )
+    winner_flags_coherent = winning_team is not None
+
+    sources: list[str] = []
+    if postgame_available:
+        sources.append("postgame")
+    if scoreboard_available:
+        sources.append("scoreboard")
+    if complete_losing_team_resignation:
+        sources.append("complete_losing_team_resignation")
+    if winner_flags_coherent:
+        sources.append("coherent_player_winner_flags")
+
+    trusted = bool(
+        winner_flags_coherent
+        and (postgame_available or scoreboard_available or complete_losing_team_resignation)
+    )
+    if not winner_flags_coherent:
+        provenance = "no_coherent_winner"
+    elif postgame_available:
+        provenance = "postgame_winner_flags"
+    elif scoreboard_available:
+        provenance = "scoreboard_winner_flags"
+    elif complete_losing_team_resignation:
+        provenance = "complete_losing_team_resignation"
+    else:
+        provenance = "coherent_player_winner_flags"
+
+    return {
+        "result_status": "resolved" if winner_flags_coherent else "unresolved",
+        "result_confidence": "high" if trusted else "medium" if winner_flags_coherent else "none",
+        "result_provenance": provenance,
+        "result_trusted": trusted,
+        "winning_player_keys": winning_player_keys,
+        "winning_player_names": winning_player_names,
+        "result_evidence": {
+            "sources": sources,
+            "winner_flags_coherent": winner_flags_coherent,
+            "postgame_available": postgame_available,
+            "scoreboard_available": scoreboard_available,
+            "complete_losing_team_resignation": complete_losing_team_resignation,
+        },
+    }
+
+
+def resolve_replay_teams(
+    values: Any,
+    *,
+    final: bool = False,
+    key_events: Any = None,
+) -> dict:
     players = canonicalize_replay_players(values)
     reason_codes: list[str] = []
     player_count = len(players)
@@ -210,7 +318,7 @@ def resolve_replay_teams(values: Any, *, final: bool = False) -> dict:
         ):
             winning_team_id = teams[winning_indexes[0]]["team_id"]
 
-    return {
+    result = {
         "status": status,
         "format": game_format,
         "confidence": "high" if status == "resolved" else "low",
@@ -221,6 +329,8 @@ def resolve_replay_teams(values: Any, *, final: bool = False) -> dict:
         "teams": teams,
         "winning_team_id": winning_team_id,
     }
+    result.update(_result_resolution(players, teams, winning_team_id, key_events))
+    return result
 
 
 def apply_replay_team_contract(stats: Any, *, final: bool | None = None) -> Any:
@@ -229,10 +339,31 @@ def apply_replay_team_contract(stats: Any, *, final: bool | None = None) -> Any:
     players = canonicalize_replay_players(stats.get("players"))
     stats["players"] = players
     is_final = bool(stats.get("completed")) if final is None else bool(final)
-    resolution = resolve_replay_teams(players, final=is_final)
     key_events = stats.get("key_events") if isinstance(stats.get("key_events"), dict) else {}
     key_events = dict(key_events)
+    resolution = resolve_replay_teams(
+        players,
+        final=is_final,
+        key_events=key_events,
+    )
     key_events["team_resolution"] = resolution
+    key_events["result_resolution"] = {
+        key: resolution[key]
+        for key in (
+            "result_status",
+            "result_confidence",
+            "result_provenance",
+            "result_trusted",
+            "winning_team_id",
+            "winning_player_keys",
+            "winning_player_names",
+            "result_evidence",
+        )
+    }
     stats["key_events"] = key_events
     stats["team_resolution"] = resolution
+    stats["winning_team_id"] = resolution["winning_team_id"]
+    stats["winning_player_keys"] = resolution["winning_player_keys"]
+    stats["winning_player_names"] = resolution["winning_player_names"]
+    stats["result_resolution"] = key_events["result_resolution"]
     return stats

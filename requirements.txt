@@ -3,7 +3,7 @@ uvicorn[standard]
 watchdog
 python-dotenv
 construct==2.8.16
-mgz==1.8.27
+mgz==1.8.51
 asyncpg
 SQLAlchemy[asyncio]
 aiofiles

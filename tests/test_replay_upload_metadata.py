@@ -58,13 +58,28 @@ def test_finality_response_exposes_retry_and_completeness_contract():
                 "confidence": "high",
                 "team_count": 2,
                 "winning_team_id": 0,
+                "winning_player_keys": ["name:jim", "name:tekki", "name:rick", "name:scavanger_ab"],
+                "result_status": "resolved",
+                "result_trusted": True,
+                "result_provenance": "complete_losing_team_resignation",
+                "result_evidence": {
+                    "sources": ["complete_losing_team_resignation"],
+                },
             },
         },
         finality_status="trusted_final",
         should_settle=True,
+        raw_replay_archived=True,
     )
     assert resolved_team_final["has_coherent_winning_team"] is True
+    assert resolved_team_final["result_resolved"] is True
+    assert resolved_team_final["result_trusted"] is True
     assert resolved_team_final["betting_eligible"] is True
+    assert resolved_team_final["stats_eligible"] is True
+    assert resolved_team_final["raw_replay_archived"] is True
+    assert resolved_team_final["artifact_accepted"] is True
+    assert resolved_team_final["final_artifact_accepted"] is True
+    assert resolved_team_final["winning_team_id"] == 0
 
     final = _finality_response(
         {"is_final": True, "players_count": 2, "winner": "Player One"},
@@ -74,6 +89,71 @@ def test_finality_response_exposes_retry_and_completeness_contract():
     assert final["final_accepted"] is True
     assert final["should_continue_monitoring"] is False
     assert final["betting_eligible"] is True
+
+
+def test_final_recorded_separates_archive_stats_and_betting_readiness():
+    response = _finality_response(
+        {
+            "is_final": True,
+            "players_count": 4,
+            # Legacy scalar remains for display compatibility but cannot settle a
+            # team game without structured trusted result evidence.
+            "winner": "Merik",
+            "team_resolution": {
+                "status": "resolved",
+                "confidence": "high",
+                "team_count": 2,
+                "winning_team_id": 1,
+                "winning_player_keys": ["name:emaren", "name:merik"],
+                "result_status": "resolved",
+                "result_trusted": False,
+                "result_provenance": "coherent_player_winner_flags",
+                "result_evidence": {"sources": ["coherent_player_winner_flags"]},
+            },
+        },
+        finality_status="final_recorded",
+        should_settle=False,
+        raw_replay_archived=True,
+    )
+
+    assert response["finality_status"] == "final_recorded"
+    assert response["raw_replay_archived"] is True
+    assert response["parse_completed"] is True
+    assert response["final_submission_received"] is True
+    assert response["result_resolved"] is True
+    assert response["stats_eligible"] is True
+    assert response["result_trusted"] is False
+    assert response["betting_eligible"] is False
+    assert response["should_settle"] is False
+    assert response["final_accepted"] is False
+    assert response["should_continue_monitoring"] is False
+
+
+def test_team_scalar_winner_never_bypasses_structured_result_contract():
+    response = _finality_response(
+        {
+            "is_final": True,
+            "players_count": 8,
+            "winner": "Jim",
+            "team_resolution": {
+                "status": "resolved",
+                "confidence": "high",
+                "team_count": 2,
+                "winning_team_id": None,
+                "winning_player_keys": [],
+                "result_status": "unresolved",
+                "result_trusted": False,
+            },
+        },
+        finality_status="final_recorded",
+        should_settle=True,
+        raw_replay_archived=True,
+    )
+
+    assert response["result_resolved"] is False
+    assert response["has_reliable_winner"] is False
+    assert response["stats_eligible"] is False
+    assert response["betting_eligible"] is False
 
 
 def test_parse_bool_header_understands_live_and_final_flags():
@@ -137,7 +217,7 @@ def test_extract_platform_match_id_trims_valid_values():
     assert _extract_platform_match_id([]) is None
 
 
-def test_infer_incomplete_uploader_outcome_promotes_opponent_for_long_rated_1v1():
+def test_infer_incomplete_uploader_outcome_never_manufactures_authoritative_result():
     user = SimpleNamespace(
         steam_id="76561198065420384",
         in_game_name="Emaren",
@@ -159,11 +239,10 @@ def test_infer_incomplete_uploader_outcome_promotes_opponent_for_long_rated_1v1(
 
     inferred = _infer_incomplete_uploader_outcome(parsed, user, None)
 
-    assert inferred is not None
-    assert inferred["winner"] == "Sniper"
-    assert inferred["disconnect_detected"] is True
-    assert inferred["parse_reason"] == "watcher_inferred_opponent_win_on_incomplete_1v1"
-    assert inferred["key_events"]["winner_inference"]["uploader_player"] == "Emaren"
+    assert inferred is None
+    assert parsed["winner"] == "Unknown"
+    assert all(player["winner"] is None for player in parsed["players"])
+    assert "winner_inference" not in parsed["key_events"]
 
 
 def test_infer_incomplete_uploader_outcome_skips_under_60_no_result():
@@ -190,8 +269,8 @@ def test_infer_incomplete_uploader_outcome_skips_under_60_no_result():
     assert _infer_incomplete_uploader_outcome(parsed, user, None) is None
 
 
-def test_has_reliable_final_signal_accepts_completed_replay():
-    assert _has_reliable_final_signal(
+def test_has_reliable_final_signal_rejects_completion_without_result_proof():
+    assert not _has_reliable_final_signal(
         {
             "winner": "Unknown",
             "key_events": {
@@ -202,12 +281,12 @@ def test_has_reliable_final_signal_accepts_completed_replay():
     )
 
 
-def test_has_reliable_final_signal_accepts_inferred_disconnect_outcome():
+def test_has_reliable_final_signal_rejects_deprecated_inferred_disconnect_outcome():
     inferred = {
         "winner": "Sniper",
     }
 
-    assert _has_reliable_final_signal(
+    assert not _has_reliable_final_signal(
         {
             "winner": "Unknown",
             "key_events": {
@@ -216,6 +295,25 @@ def test_has_reliable_final_signal_accepts_inferred_disconnect_outcome():
             },
         },
         inferred,
+    )
+
+
+def test_has_reliable_final_signal_accepts_structured_complete_team_result():
+    assert _has_reliable_final_signal(
+        {
+            "winner": "Merik",
+            "players": [
+                {"name": "Emaren", "number": 1, "team_id": 1, "winner": True},
+                {"name": "Merik", "number": 2, "team_id": 1, "winner": True},
+                {"name": "javier_sv1907", "number": 3, "team_id": 0, "winner": False},
+                {"name": "Matzar117", "number": 4, "team_id": 0, "winner": False},
+            ],
+            "key_events": {
+                "completed": True,
+                "resigned_player_numbers": [3, 4],
+                "postgame_available": False,
+            },
+        }
     )
 
 
