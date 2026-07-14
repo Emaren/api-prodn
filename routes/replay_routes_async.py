@@ -40,6 +40,9 @@ FINALITY_LIVE = "live"
 FINALITY_LIVE_PENDING_PARSE = "live_pending_parse"
 FINALITY_FINAL_NOT_READY = "final_not_ready"
 FINALITY_FINAL_UNPARSED_PROOF = "final_unparsed_proof"
+FINALITY_FINAL_RECORDED = "final_recorded"
+FINALITY_FINAL_RECORDED_DUPLICATE = "final_recorded_duplicate"
+FINALITY_FINAL_RECORDED_REFRESHED = "final_recorded_refreshed"
 FINALITY_TRUSTED_FINAL = "trusted_final"
 FINALITY_TRUSTED_FINAL_DUPLICATE = "trusted_final_duplicate"
 FINALITY_TRUSTED_FINAL_REFRESHED = "trusted_final_refreshed"
@@ -206,29 +209,66 @@ def _finality_response(
     should_settle: bool = False,
     pending_parse: bool = False,
     unparsed_final: bool = False,
+    raw_replay_archived: bool | None = None,
 ):
     is_final = bool(payload.get("is_final"))
     player_count = int(payload.get("players_count") or 0)
     winner = str(payload.get("winner") or "Unknown").strip()
-    has_reliable_winner = winner.lower() not in {"", "unknown", "none", "null"}
-    final_accepted = bool(is_final and should_settle)
+    legacy_scalar_winner_present = winner.lower() not in {"", "unknown", "none", "null"}
     team_resolution = (
         payload.get("team_resolution")
         if isinstance(payload.get("team_resolution"), dict)
         else {}
     )
     is_team_game = player_count > 2
+    has_structured_result = bool(team_resolution)
+    winning_team_id = team_resolution.get("winning_team_id")
+    winning_player_keys = (
+        team_resolution.get("winning_player_keys")
+        if isinstance(team_resolution.get("winning_player_keys"), list)
+        else []
+    )
+    winning_player_names = (
+        team_resolution.get("winning_player_names")
+        if isinstance(team_resolution.get("winning_player_names"), list)
+        else []
+    )
+    result_resolved = bool(
+        team_resolution.get("result_status") == "resolved"
+        and winning_team_id is not None
+        and winning_player_keys
+    )
+    result_trusted = bool(result_resolved and team_resolution.get("result_trusted") is True)
+
+    # Compatibility for older 1v1 producers that predate the structured result
+    # contract. A scalar name is never sufficient team-game truth.
+    if not has_structured_result and not is_team_game:
+        result_resolved = legacy_scalar_winner_present
+        result_trusted = legacy_scalar_winner_present
+
     has_reliable_teams = not is_team_game or (
         team_resolution.get("status") == "resolved"
         and team_resolution.get("confidence") == "high"
         and int(team_resolution.get("team_count") or 0) == 2
     )
-    has_coherent_winning_team = not is_team_game or team_resolution.get("winning_team_id") is not None
+    has_coherent_winning_team = not is_team_game or winning_team_id is not None
+    betting_eligible = bool(
+        is_final
+        and should_settle
+        and result_trusted
+        and has_reliable_teams
+        and has_coherent_winning_team
+    )
+    stats_eligible = bool(is_final and result_resolved)
+    final_accepted = betting_eligible
+    parse_completed = not bool(pending_parse or unparsed_final)
+    artifact_archived = bool(raw_replay_archived)
+    artifact_accepted = artifact_archived
     if finality_status == FINALITY_FINAL_UNPARSED_PROOF:
         completeness = "final_unparsed_proof"
-    elif is_final and final_accepted and has_reliable_winner:
+    elif is_final and result_resolved:
         completeness = "final_result_only"
-    elif is_final and not has_reliable_winner:
+    elif is_final and not result_resolved:
         completeness = "final_unsafe"
     elif not is_final and player_count >= 2:
         completeness = "live_roster"
@@ -241,25 +281,42 @@ def _finality_response(
         "should_settle": bool(should_settle),
         "pending_parse": bool(pending_parse),
         "unparsed_final": bool(unparsed_final),
+        "raw_replay_archived": artifact_archived,
+        "artifact_archived": artifact_archived,
+        "artifact_accepted": artifact_accepted,
+        "parse_completed": parse_completed,
+        "final_submission_received": is_final,
+        "final_artifact_accepted": bool(is_final and artifact_accepted),
         "final_accepted": final_accepted,
-        "should_continue_monitoring": not final_accepted,
+        # Compatibility: this remains the result-finality signal. Consumers that
+        # only need upload durability should use artifact_accepted instead.
+        # Result review can continue server-side after the final bytes are safely
+        # archived. The desktop watcher should only keep a file open when those
+        # bytes have not yet landed durably.
+        "should_continue_monitoring": not bool(
+            is_final and (artifact_archived or final_accepted)
+        ),
         "should_retry": bool(pending_parse or finality_status == FINALITY_FINAL_NOT_READY),
         "parse_completeness": completeness,
         "has_reliable_roster": player_count >= 2,
         "has_reliable_teams": has_reliable_teams,
         "has_coherent_winning_team": has_coherent_winning_team,
-        "has_reliable_winner": has_reliable_winner,
-        "betting_eligible": (
-            final_accepted
-            and has_reliable_winner
-            and has_reliable_teams
-            and has_coherent_winning_team
-        ),
-        "stats_eligible": final_accepted and has_reliable_winner,
+        "has_reliable_winner": result_trusted,
+        "result_resolved": result_resolved,
+        "result_trusted": result_trusted,
+        "result_status": team_resolution.get("result_status"),
+        "result_confidence": team_resolution.get("result_confidence"),
+        "winning_team_id": winning_team_id,
+        "winning_player_keys": winning_player_keys,
+        "winning_player_names": winning_player_names,
+        "result_provenance": team_resolution.get("result_provenance"),
+        "result_evidence": team_resolution.get("result_evidence") or {},
+        "betting_eligible": betting_eligible,
+        "stats_eligible": stats_eligible,
         "safe_public_status": (
             "Final accepted"
             if final_accepted
-            else "Final proof stored; result under review"
+            else "Final replay received"
             if is_final
             else "Live replay received"
         ),
@@ -268,9 +325,26 @@ def _finality_response(
 
 def _apply_route_team_contract(players: list, key_events: dict, *, final: bool):
     canonical_players = canonicalize_replay_players(players)
-    resolution = resolve_replay_teams(canonical_players, final=final)
     canonical_key_events = dict(key_events) if isinstance(key_events, dict) else {}
+    resolution = resolve_replay_teams(
+        canonical_players,
+        final=final,
+        key_events=canonical_key_events,
+    )
     canonical_key_events["team_resolution"] = resolution
+    canonical_key_events["result_resolution"] = {
+        key: resolution[key]
+        for key in (
+            "result_status",
+            "result_confidence",
+            "result_provenance",
+            "result_trusted",
+            "winning_team_id",
+            "winning_player_keys",
+            "winning_player_names",
+            "result_evidence",
+        )
+    }
     return canonical_players, canonical_key_events, resolution
 
 
@@ -735,86 +809,36 @@ def _match_uploader_player(players: list, user, claimed_name: Optional[str]):
 
 
 def _infer_incomplete_uploader_outcome(parsed: dict, user, claimed_name: Optional[str]):
-    winner = parsed.get("winner") or "Unknown"
-    players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
-    completed = parsed.get("completed")
-    key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
+    """Deprecated compatibility hook; never manufactures authoritative truth.
 
-    if winner not in {"", None, "Unknown"}:
-        return None
-    if user is None:
-        return None
-    if parsed.get("parse_reason") == "hd_early_exit_under_60s" or key_events.get("no_rated_result"):
-        return None
-    if completed is not False:
-        return None
-    if len(players) != 2:
-        return None
-    if not key_events.get("rated"):
-        return None
-
-    uploader_player = _match_uploader_player(players, user, claimed_name)
-    if not uploader_player:
-        return None
-
-    uploader_name = str(uploader_player.get("name", "") or "").strip()
-    opponents = [
-        dict(player)
-        for player in players
-        if _norm_name(str(player.get("name", "") or "")) != _norm_name(uploader_name)
-    ]
-    if len(opponents) != 1:
-        return None
-
-    inferred_winner = str(opponents[0].get("name", "") or "").strip()
-    if not inferred_winner:
-        return None
-
-    patched_players = []
-    for player in players:
-        updated = dict(player)
-        if _norm_name(str(updated.get("name", "") or "")) == _norm_name(inferred_winner):
-            updated["winner"] = True
-        elif _norm_name(str(updated.get("name", "") or "")) == _norm_name(uploader_name):
-            updated["winner"] = False
-        patched_players.append(updated)
-
-    key_events = dict(parsed.get("key_events") or {})
-    key_events["winner_inference"] = {
-        "type": "uploader_incomplete_1v1_opponent",
-        "uploader_player": uploader_name,
-        "inferred_winner": inferred_winner,
-    }
-
-    return {
-        "winner": inferred_winner,
-        "players": patched_players,
-        "disconnect_detected": True,
-        "parse_reason": "watcher_inferred_opponent_win_on_incomplete_1v1",
-        "key_events": key_events,
-    }
+    Historical code promoted the opponent when a rated uploader-owned 1v1 ended
+    without a recorded result. A disconnect, crash, save, or observer perspective
+    can all produce that shape, so this inference is no longer allowed to mutate
+    player winner flags, public stats, or settlement eligibility.
+    """
+    return None
 
 
 def _has_reliable_final_signal(parsed: dict, inferred_outcome: Optional[dict] = None):
-    if inferred_outcome:
-        return True
-
     key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
-    if key_events.get("completed") is True:
-        return True
-    if key_events.get("postgame_available") is True:
-        return True
-    if key_events.get("has_achievements") is True:
-        return True
-    if _coerce_positive_int(key_events.get("player_score_count")) > 0:
-        return True
-    winner = parsed.get("winner")
-    if isinstance(winner, str):
-        cleaned_winner = winner.strip()
-        if cleaned_winner and cleaned_winner != "Unknown":
-            return True
+    team_resolution = parsed.get("team_resolution")
+    if not isinstance(team_resolution, dict):
+        team_resolution = key_events.get("team_resolution")
+    if not isinstance(team_resolution, dict):
+        team_resolution = resolve_replay_teams(
+            parsed.get("players") if isinstance(parsed.get("players"), list) else [],
+            final=True,
+            key_events=key_events,
+        )
 
-    return False
+    # The deprecated inferred_outcome argument is intentionally ignored. Only a
+    # structured result backed by direct postgame/scoreboard data or complete
+    # losing-team resignation evidence may authorize final settlement.
+    return bool(
+        team_resolution.get("result_status") == "resolved"
+        and team_resolution.get("winning_team_id") is not None
+        and team_resolution.get("result_trusted") is True
+    )
 
 
 def _normalize_live_disconnect_detected(
@@ -1065,27 +1089,6 @@ async def parse_new_replay(
         disconnect_detected = bool(data.disconnect_detected)
         parse_reason = data.parse_reason or "json_submission"
 
-        if mode == "final" and data.is_final:
-            uploader_user = await _load_user_by_uid(db, user_uid)
-            inferred_outcome = _infer_incomplete_uploader_outcome(
-                {
-                    "winner": winner,
-                    "players": players,
-                    "completed": key_events.get("completed"),
-                    "key_events": key_events,
-                    "disconnect_detected": disconnect_detected,
-                    "parse_reason": parse_reason,
-                },
-                uploader_user,
-                None,
-            )
-            if inferred_outcome:
-                players = inferred_outcome["players"]
-                winner = inferred_outcome["winner"]
-                disconnect_detected = inferred_outcome["disconnect_detected"]
-                parse_reason = inferred_outcome["parse_reason"]
-                key_events = inferred_outcome["key_events"]
-
         players, key_events, _team_resolution = _apply_route_team_contract(
             players,
             key_events,
@@ -1299,6 +1302,7 @@ async def upload_replay_file(
                         },
                         finality_status=FINALITY_LIVE_PENDING_PARSE,
                         pending_parse=True,
+                        raw_replay_archived=bool(raw_replay_archive_path),
                     )
 
                 if is_final_upload and mode == "watcher":
@@ -1355,6 +1359,7 @@ async def upload_replay_file(
                             },
                             finality_status=FINALITY_FINAL_UNPARSED_PROOF,
                             unparsed_final=True,
+                            raw_replay_archived=bool(raw_replay_archive_path),
                         )
 
                     existing_unparsed_final = await _load_existing_unparsed_final_game(
@@ -1433,6 +1438,7 @@ async def upload_replay_file(
                         },
                         finality_status=FINALITY_FINAL_UNPARSED_PROOF,
                         unparsed_final=True,
+                        raw_replay_archived=bool(raw_replay_archive_path),
                     )
 
                 await _record_parse_attempt(
@@ -1478,58 +1484,22 @@ async def upload_replay_file(
                 key_events,
             )
 
-            inferred_outcome = None
-            if is_final_upload:
-                inferred_outcome = _infer_incomplete_uploader_outcome(
-                    parsed,
-                    uploader_user,
-                    x_player_name,
-                )
-            if inferred_outcome:
-                players = inferred_outcome["players"]
-                winner = inferred_outcome["winner"]
-                disconnect_detected = inferred_outcome["disconnect_detected"]
-                parse_reason = inferred_outcome["parse_reason"]
-                key_events = inferred_outcome["key_events"]
-
             players, key_events, team_resolution = _apply_route_team_contract(
                 players,
                 key_events,
                 final=is_final_upload,
             )
-
-            if (
+            final_result_trusted = bool(
                 is_final_upload
-                and not _has_reliable_final_signal(parsed, inferred_outcome)
-            ):
-                await _record_parse_attempt(
-                    db,
-                    user_uid=uploader_uid,
-                    replay_hash=replay_hash,
-                    original_filename=original_name,
-                    parse_source=parse_source,
-                    status="final_not_ready",
-                    detail=parse_failure_detail,
-                    upload_mode=mode,
-                    file_size_bytes=written,
-                    played_on=played_on,
-                )
-                await db.commit()
-                return _finality_response(
+                and _has_reliable_final_signal(
                     {
-                        "message": parse_failure_detail,
-                        "replay_hash": replay_hash,
-                        "winner": winner,
-                        "players_count": len(players),
-                        "uploader_uid": uploader_uid,
-                        "upload_mode": mode,
-                        "parse_iteration": parse_iteration,
-                        "is_final": True,
+                        **parsed,
+                        "players": players,
+                        "key_events": key_events,
                         "team_resolution": team_resolution,
                     },
-                    finality_status=FINALITY_FINAL_NOT_READY,
-                    should_settle=False,
                 )
+            )
 
             if not is_final_upload:
                 existing_placeholder_live = await _load_existing_placeholder_live_game(
@@ -1584,6 +1554,7 @@ async def upload_replay_file(
                             "team_resolution": team_resolution,
                         },
                         finality_status=FINALITY_LIVE,
+                        raw_replay_archived=bool(raw_replay_archive_path),
                     )
 
             existing_final = await db.execute(
@@ -1644,8 +1615,13 @@ async def upload_replay_file(
                             "is_final": True,
                             "team_resolution": team_resolution,
                         },
-                        finality_status=FINALITY_TRUSTED_FINAL_REFRESHED,
-                        should_settle=True,
+                        finality_status=(
+                            FINALITY_TRUSTED_FINAL_REFRESHED
+                            if final_result_trusted
+                            else FINALITY_FINAL_RECORDED_REFRESHED
+                        ),
+                        should_settle=final_result_trusted,
+                        raw_replay_archived=bool(raw_replay_archive_path),
                     )
 
                 await _record_parse_attempt(
@@ -1673,8 +1649,13 @@ async def upload_replay_file(
                         "is_final": True,
                         "team_resolution": team_resolution,
                     },
-                    finality_status=FINALITY_TRUSTED_FINAL_DUPLICATE,
-                    should_settle=True,
+                    finality_status=(
+                        FINALITY_TRUSTED_FINAL_DUPLICATE
+                        if final_result_trusted
+                        else FINALITY_FINAL_RECORDED_DUPLICATE
+                    ),
+                    should_settle=final_result_trusted,
+                    raw_replay_archived=bool(raw_replay_archive_path),
                 )
 
             platform_match_id = _extract_platform_match_id(key_events)
@@ -1742,8 +1723,13 @@ async def upload_replay_file(
                                 "is_final": True,
                                 "team_resolution": team_resolution,
                             },
-                            finality_status=FINALITY_REVIEWED_MATCH_REFRESHED,
-                            should_settle=True,
+                            finality_status=(
+                                FINALITY_REVIEWED_MATCH_REFRESHED
+                                if final_result_trusted
+                                else FINALITY_FINAL_RECORDED_REFRESHED
+                            ),
+                            should_settle=final_result_trusted,
+                            raw_replay_archived=bool(raw_replay_archive_path),
                         )
 
                     await _record_parse_attempt(
@@ -1772,8 +1758,13 @@ async def upload_replay_file(
                             "is_final": True,
                             "team_resolution": team_resolution,
                         },
-                        finality_status=FINALITY_REVIEWED_MATCH_DUPLICATE,
-                        should_settle=True,
+                        finality_status=(
+                            FINALITY_REVIEWED_MATCH_DUPLICATE
+                            if final_result_trusted
+                            else FINALITY_FINAL_RECORDED_DUPLICATE
+                        ),
+                        should_settle=final_result_trusted,
+                        raw_replay_archived=bool(raw_replay_archive_path),
                     )
 
             if not is_final_upload:
@@ -1832,6 +1823,7 @@ async def upload_replay_file(
                                 "team_resolution": team_resolution,
                             },
                             finality_status=FINALITY_LIVE,
+                            raw_replay_archived=bool(raw_replay_archive_path),
                         )
 
                     await _record_parse_attempt(
@@ -1861,6 +1853,7 @@ async def upload_replay_file(
                             "team_resolution": team_resolution,
                         },
                         finality_status=FINALITY_LIVE,
+                        raw_replay_archived=bool(raw_replay_archive_path),
                     )
 
             previous_version_rows = []
@@ -1980,8 +1973,15 @@ async def upload_replay_file(
                 "is_final": is_final_upload,
                 "team_resolution": team_resolution,
             },
-            finality_status=FINALITY_TRUSTED_FINAL if is_final_upload else FINALITY_LIVE,
-            should_settle=is_final_upload,
+            finality_status=(
+                FINALITY_TRUSTED_FINAL
+                if final_result_trusted
+                else FINALITY_FINAL_RECORDED
+                if is_final_upload
+                else FINALITY_LIVE
+            ),
+            should_settle=final_result_trusted,
+            raw_replay_archived=bool(raw_replay_archive_path),
         )
     finally:
         try:

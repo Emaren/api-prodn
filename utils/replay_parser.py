@@ -22,7 +22,8 @@ def _patch_mgz_hd_type9_game_type():
     """
     AoE2 HD can emit lobby game_type_id=9 for Turbo Random-style custom-map games.
 
-    mgz 1.8.27 knows TurboRandom=8 but not 9. Without this compatibility shim,
+    Upstream mgz knows TurboRandom=8 but not this HD-specific value 9. Without
+    this compatibility shim,
     header.parse/summary.Summary fail with:
         no decoding mapping for 9 (parsing) -> lobby
 

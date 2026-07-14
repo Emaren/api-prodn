@@ -41,6 +41,9 @@ def test_explicit_2v2_3v3_and_4v4_resolve_independent_of_player_order():
         assert normal["format"] == f"{size}v{size}"
         assert normal["teams"] == reversed_result["teams"]
         assert normal["winning_team_id"] == 0
+        assert normal["winning_player_keys"] == normal["teams"][0]["player_keys"]
+        assert normal["result_status"] == "resolved"
+        assert normal["result_trusted"] is False
 
 
 def test_team_games_fail_closed_without_two_complete_equal_explicit_teams():
@@ -67,3 +70,82 @@ def test_contract_embeds_resolution_in_key_events():
     stats = apply_replay_team_contract({"players": team_players(2), "key_events": {}}, final=True)
     assert stats["team_resolution"]["format"] == "2v2"
     assert stats["key_events"]["team_resolution"] == stats["team_resolution"]
+    assert stats["winning_team_id"] == 0
+    assert stats["winning_player_keys"] == stats["team_resolution"]["winning_player_keys"]
+    assert stats["key_events"]["result_resolution"] == stats["result_resolution"]
+
+
+def test_golden_hd_2v2_requires_full_losing_team_resignation_for_trusted_result():
+    # Mirrors the supplied 2026-07-06 18:28:42 HD replay: Emaren and Merik
+    # won as one complete team and both opponents resigned.
+    players = [
+        {"name": "Emaren", "number": 1, "team_id": 1, "winner": True},
+        {"name": "Merik", "number": 2, "team_id": 1, "winner": True},
+        {"name": "javier_sv1907", "number": 3, "team_id": 0, "winner": False},
+        {"name": "Matzar117", "number": 4, "team_id": 0, "winner": False},
+    ]
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={
+            "completed": True,
+            "resigned_player_numbers": [3, 4],
+            "resigned_player_names": ["javier_sv1907", "Matzar117"],
+            "postgame_available": False,
+            "has_scores": False,
+            "has_achievements": False,
+        },
+    )
+
+    assert result["winning_team_id"] == 1
+    assert result["winning_player_names"] == ["Emaren", "Merik"]
+    assert result["result_status"] == "resolved"
+    assert result["result_confidence"] == "high"
+    assert result["result_trusted"] is True
+    assert result["result_provenance"] == "complete_losing_team_resignation"
+
+
+def test_first_team_resignation_is_display_evidence_not_settlement_proof():
+    players = [
+        {"name": "Alpha", "number": 1, "team_id": 0, "winner": True},
+        {"name": "Bravo", "number": 2, "team_id": 0, "winner": True},
+        {"name": "Charlie", "number": 3, "team_id": 1, "winner": False},
+        {"name": "Delta", "number": 4, "team_id": 1, "winner": False},
+    ]
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={
+            "completed": True,
+            "resigned_player_numbers": [3],
+            "postgame_available": False,
+        },
+    )
+
+    assert result["winning_player_names"] == ["Alpha", "Bravo"]
+    assert result["result_status"] == "resolved"
+    assert result["result_confidence"] == "medium"
+    assert result["result_trusted"] is False
+    assert result["result_evidence"]["complete_losing_team_resignation"] is False
+
+
+def test_golden_hd_no_resignation_keeps_result_unresolved():
+    result = resolve_replay_teams(
+        [
+            {"name": "Emaren", "number": 1, "team_id": 1, "winner": None},
+            {"name": "lucas T", "number": 2, "team_id": 0, "winner": None},
+        ],
+        final=True,
+        key_events={
+            "completed": False,
+            "resigned_player_numbers": [],
+            "postgame_available": False,
+            "has_scores": False,
+            "has_achievements": False,
+        },
+    )
+
+    assert result["winning_team_id"] is None
+    assert result["winning_player_keys"] == []
+    assert result["result_status"] == "unresolved"
+    assert result["result_trusted"] is False
