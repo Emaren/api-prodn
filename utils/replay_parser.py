@@ -1088,6 +1088,15 @@ def _parse_sync_bytes_with_diagnostics(
         owner_player_number = s.get_owner()
         raw_duration_ms = s.get_duration()
         normalized_duration_seconds = _normalize_mgz_duration_seconds(raw_duration_ms)
+        settings_summary = _extract_settings_summary(s)
+        normalized_game_type = settings_summary.get("type")
+        enum_game_type_name = getattr(normalized_game_type, "name", None)
+        if isinstance(enum_game_type_name, str) and enum_game_type_name.strip():
+            normalized_game_type = enum_game_type_name.strip()
+        elif isinstance(normalized_game_type, str):
+            normalized_game_type = normalized_game_type.strip() or None
+        elif normalized_game_type is not None:
+            normalized_game_type = str(normalized_game_type).strip() or None
 
         stats = {
             "game_version": str(h.version),
@@ -1095,7 +1104,10 @@ def _parse_sync_bytes_with_diagnostics(
                 "name": s.get_map().get("name", "Unknown"),
                 "size": s.get_map().get("size", "Unknown"),
             },
-            "game_type": str(s.get_version()),
+            # Summary.get_version() is a parser/version tuple, not the lobby's
+            # gameplay type.  The normalized settings lane is the canonical HD
+            # source for RM, DM, TurboRandom9, and related game-type labels.
+            "game_type": normalized_game_type or "Unknown",
             "duration": normalized_duration_seconds or 0,
         }
 
@@ -1187,7 +1199,6 @@ def _parse_sync_bytes_with_diagnostics(
             "raw_duration_ms": int(raw_duration_ms) if isinstance(raw_duration_ms, (int, float)) else None,
             "duration_source": "mgz_summary_ms_normalized",
         }
-        settings_summary = _extract_settings_summary(s)
         if settings_summary:
             stats["key_events"]["settings"] = settings_summary
         if platform_ratings:

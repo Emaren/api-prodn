@@ -128,34 +128,19 @@ def _stable_player_key(player: dict) -> str:
 def _result_resolution(
     players: list[dict],
     teams: list[dict],
-    winning_team_id: Any,
+    winner_flag_team_id: Any,
     key_events: Any,
 ) -> dict:
     """Describe result truth separately from lobby/team truth.
 
     ``mgz`` winner flags are useful evidence, but in an HD team game they can be
-    inferred after the first resignation.  They are therefore enough to expose a
-    coherent result candidate, but not enough on their own to authorize money.
-    A postgame table, scoreboard payload, or resignation by every member of the
-    losing team upgrades that candidate to trusted result proof.
+    inferred after the first resignation.  Resignation proof therefore resolves
+    a result only when exactly one complete explicit team resigned.  The other
+    explicit team is then the derived winner.  No complete team, both complete
+    teams, or a conflict with coherent winner flags remains review-only.
     """
     events = key_events if isinstance(key_events, dict) else {}
     player_by_key = {_stable_player_key(player): player for player in players}
-    winning_team = next(
-        (team for team in teams if team.get("team_id") == winning_team_id),
-        None,
-    )
-    winning_player_keys = list(winning_team.get("player_keys") or []) if winning_team else []
-    winning_player_names = list(winning_team.get("players") or []) if winning_team else []
-
-    losing_player_keys = [
-        player_key
-        for team in teams
-        if team.get("team_id") != winning_team_id
-        for player_key in team.get("player_keys") or []
-    ] if winning_team else []
-    losing_players = [player_by_key[key] for key in losing_player_keys if key in player_by_key]
-
     resigned_numbers = {
         _integer(value)
         for value in events.get("resigned_player_numbers", [])
@@ -174,8 +159,49 @@ def _result_resolution(
             bool(name) and name in resigned_names
         )
 
-    complete_losing_team_resignation = bool(losing_players) and all(
-        player_resigned(player) for player in losing_players
+    fully_resigned_team_ids = []
+    partially_resigned_team_ids = []
+    resignation_counts_by_team = []
+    for team in teams:
+        team_players = [
+            player_by_key[player_key]
+            for player_key in team.get("player_keys") or []
+            if player_key in player_by_key
+        ]
+        resigned_count = sum(player_resigned(player) for player in team_players)
+        player_count = len(team_players)
+        resignation_counts_by_team.append(
+            {
+                "team_id": team.get("team_id"),
+                "player_count": player_count,
+                "resigned_player_count": resigned_count,
+            }
+        )
+        if player_count and resigned_count == player_count:
+            fully_resigned_team_ids.append(team.get("team_id"))
+        elif resigned_count > 0:
+            partially_resigned_team_ids.append(team.get("team_id"))
+
+    resignation_derived_winning_team_id = None
+    if len(teams) == 2 and len(fully_resigned_team_ids) == 1:
+        resigned_team_id = fully_resigned_team_ids[0]
+        resignation_derived_winning_team_id = next(
+            (
+                team.get("team_id")
+                for team in teams
+                if team.get("team_id") != resigned_team_id
+            ),
+            None,
+        )
+
+    resignation_result_conflict = bool(
+        resignation_derived_winning_team_id is not None
+        and winner_flag_team_id is not None
+        and resignation_derived_winning_team_id != winner_flag_team_id
+    )
+    complete_losing_team_resignation = bool(
+        resignation_derived_winning_team_id is not None
+        and not resignation_result_conflict
     )
     postgame_available = bool(events.get("postgame_available"))
     scoreboard_available = bool(
@@ -184,7 +210,7 @@ def _result_resolution(
         or _integer(events.get("player_score_count"))
         or _integer(events.get("achievement_player_count"))
     )
-    winner_flags_coherent = winning_team is not None
+    winner_flags_coherent = winner_flag_team_id is not None
 
     sources: list[str] = []
     if postgame_available:
@@ -196,24 +222,41 @@ def _result_resolution(
     if winner_flags_coherent:
         sources.append("coherent_player_winner_flags")
 
-    trusted = bool(
-        winner_flags_coherent
-        and (postgame_available or scoreboard_available or complete_losing_team_resignation)
-    )
-    if not winner_flags_coherent:
-        provenance = "no_coherent_winner"
-    elif postgame_available:
-        provenance = "postgame_winner_flags"
-    elif scoreboard_available:
-        provenance = "scoreboard_winner_flags"
+    winning_team_id = None
+    if resignation_result_conflict or len(fully_resigned_team_ids) > 1:
+        provenance = "conflicting_result_evidence"
     elif complete_losing_team_resignation:
+        winning_team_id = resignation_derived_winning_team_id
         provenance = "complete_losing_team_resignation"
+    elif postgame_available and winner_flags_coherent:
+        winning_team_id = winner_flag_team_id
+        provenance = "postgame_winner_flags"
+    elif scoreboard_available and winner_flags_coherent:
+        winning_team_id = winner_flag_team_id
+        provenance = "scoreboard_winner_flags"
+    elif winner_flags_coherent:
+        provenance = "coherent_player_winner_flags_review"
     else:
-        provenance = "coherent_player_winner_flags"
+        provenance = "insufficient_result_evidence"
+
+    trusted = winning_team_id is not None
+    winning_team = next(
+        (team for team in teams if team.get("team_id") == winning_team_id),
+        None,
+    )
+    winning_player_keys = list(winning_team.get("player_keys") or []) if winning_team else []
+    winning_player_names = list(winning_team.get("players") or []) if winning_team else []
+    if len(fully_resigned_team_ids) == 1:
+        resignation_state = "exactly_one_complete_team"
+    elif len(fully_resigned_team_ids) > 1:
+        resignation_state = "multiple_complete_teams"
+    else:
+        resignation_state = "no_complete_team"
 
     return {
-        "result_status": "resolved" if winner_flags_coherent else "unresolved",
-        "result_confidence": "high" if trusted else "medium" if winner_flags_coherent else "none",
+        "winning_team_id": winning_team_id,
+        "result_status": "resolved" if trusted else "review_required",
+        "result_confidence": "high" if trusted else "review",
         "result_provenance": provenance,
         "result_trusted": trusted,
         "winning_player_keys": winning_player_keys,
@@ -221,9 +264,19 @@ def _result_resolution(
         "result_evidence": {
             "sources": sources,
             "winner_flags_coherent": winner_flags_coherent,
+            "winner_flag_team_id": winner_flag_team_id,
             "postgame_available": postgame_available,
             "scoreboard_available": scoreboard_available,
             "complete_losing_team_resignation": complete_losing_team_resignation,
+            "resignation_state": resignation_state,
+            "fully_resigned_team_ids": fully_resigned_team_ids,
+            "partially_resigned_team_ids": partially_resigned_team_ids,
+            "resignation_counts_by_team": resignation_counts_by_team,
+            "resignation_derived_winning_team_id": (
+                resignation_derived_winning_team_id
+            ),
+            "resignation_result_conflict": resignation_result_conflict,
+            "team_completion_from_resignations": complete_losing_team_resignation,
         },
     }
 
@@ -300,7 +353,7 @@ def resolve_replay_teams(
             game_format = f"{expected_size}v{expected_size}"
             provenance = "explicit_final_team_ids" if final else "explicit_replay_team_ids"
 
-    winning_team_id = None
+    winner_flag_team_id = None
     if status == "resolved":
         winning_indexes = []
         losing_indexes = []
@@ -316,7 +369,7 @@ def resolve_replay_teams(
             and len(losing_indexes) == 1
             and winning_indexes[0] != losing_indexes[0]
         ):
-            winning_team_id = teams[winning_indexes[0]]["team_id"]
+            winner_flag_team_id = teams[winning_indexes[0]]["team_id"]
 
     result = {
         "status": status,
@@ -327,9 +380,11 @@ def resolve_replay_teams(
         "player_count": player_count,
         "team_count": len(teams),
         "teams": teams,
-        "winning_team_id": winning_team_id,
+        "winning_team_id": None,
     }
-    result.update(_result_resolution(players, teams, winning_team_id, key_events))
+    result.update(
+        _result_resolution(players, teams, winner_flag_team_id, key_events)
+    )
     return result
 
 
@@ -346,6 +401,33 @@ def apply_replay_team_contract(stats: Any, *, final: bool | None = None) -> Any:
         final=is_final,
         key_events=key_events,
     )
+    completion_source = str(
+        stats.get("completion_source") or key_events.get("completion_source") or ""
+    )
+    if completion_source == "resignation":
+        resignation_proves_team_completion = bool(
+            resolution.get("result_evidence", {}).get(
+                "team_completion_from_resignations"
+            )
+        )
+        key_events["raw_mgz_completed_signal"] = bool(
+            stats.get("completed") or key_events.get("completed")
+        )
+        key_events["resignation_proves_team_completion"] = (
+            resignation_proves_team_completion
+        )
+        if resignation_proves_team_completion:
+            stats["completion_source"] = "complete_team_resignation"
+            key_events["completion_source"] = "complete_team_resignation"
+        else:
+            # HD's completion/winner flags can flip on the first teammate
+            # resignation.  Preserve that raw signal above, but do not project it
+            # as a completed team game without a single fully resigned team.
+            stats["completed"] = False
+            key_events["completed"] = False
+            stats["completion_source"] = "team_resignation_review_required"
+            key_events["completion_source"] = "team_resignation_review_required"
+            stats["parse_reason"] = "team_resignation_not_complete"
     key_events["team_resolution"] = resolution
     key_events["result_resolution"] = {
         key: resolution[key]

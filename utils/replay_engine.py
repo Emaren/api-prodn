@@ -25,11 +25,11 @@ from typing import Any
 from mgz.reference import get_consts
 
 
-PARSER_CONTRACT_VERSION = "1.0"
-PARSER_SCHEMA_VERSION = "2026-07-14.1"
+PARSER_CONTRACT_VERSION = "1.1"
+PARSER_SCHEMA_VERSION = "2026-07-15.2"
 PARSER_IMPLEMENTATION = "aoe2war.mgz_hd"
 PARSER_PASS_NAME = "hd_deterministic_evidence"
-PARSER_PASS_VERSION = "1"
+PARSER_PASS_VERSION = "2"
 MAX_COMPACT_RECEIPT_JSON_BYTES = 32 * 1024
 
 PROVENANCE_DIRECT_HEADER = "direct_header"
@@ -106,6 +106,12 @@ _ACTION_FAMILIES = {
     "resign": "resignation",
     "flare": "team_signal",
 }
+_ACTION_PACKET_IDENTITY_FIELDS = (
+    "timestamp_ms",
+    "type",
+    "player_number",
+    "payload",
+)
 _URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]{2,}://[^\s]+", re.IGNORECASE)
 _QUOTED_PATH_RE = re.compile(
     r'''(?P<quote>["'])(?:[A-Za-z]:[\\/]|/)[^"'\r\n]+(?P=quote)''',
@@ -440,10 +446,77 @@ def _player_number_from_model(player: Any) -> int | None:
     return _integer(getattr(player, "number", None))
 
 
+def _action_packet_identity_material(action: dict[str, Any]) -> dict[str, Any]:
+    """Return the normalized, ordinal-free identity of one parsed action packet."""
+    return {
+        field: action.get(field)
+        for field in _ACTION_PACKET_IDENTITY_FIELDS
+    }
+
+
+def _annotate_action_packet_identities(
+    actions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Attach stable packet hashes and summarize exact parsed-packet duplicates.
+
+    This is deliberately an identity-normalization lane, not an assertion that
+    repeated packets are invalid gameplay actions.  The raw stream remains in
+    original order and every packet remains present.
+    """
+    identity_ordinals: dict[str, list[int]] = defaultdict(list)
+    first_by_identity: dict[str, dict[str, Any]] = {}
+    normalized_actions: list[dict[str, Any]] = []
+
+    for packet_index, action in enumerate(actions, start=1):
+        identity = _stable_hash(_action_packet_identity_material(action))
+        action["packet_identity_sha256"] = identity
+        ordinal = _integer(action.get("ordinal")) or packet_index
+        identity_ordinals[identity].append(ordinal)
+        if identity not in first_by_identity:
+            first_by_identity[identity] = action
+            normalized_actions.append(action)
+
+    multiplicities = Counter(
+        len(identity_ordinals[identity])
+        for identity in first_by_identity
+    )
+    duplicate_identities = [
+        {
+            "packet_identity_sha256": identity,
+            "multiplicity": len(identity_ordinals[identity]),
+            "first_ordinal": min(identity_ordinals[identity]),
+            "last_ordinal": max(identity_ordinals[identity]),
+        }
+        for identity in sorted(first_by_identity)
+        if len(identity_ordinals[identity]) > 1
+    ]
+    unique_count = len(first_by_identity)
+    summary = {
+        "identity_algorithm": "sha256_canonical_json_v1",
+        "identity_fields": list(_ACTION_PACKET_IDENTITY_FIELDS),
+        "normalization_scope": "exact_parsed_packet_identity_only",
+        "validated_gameplay_truth": False,
+        "unique_action_identity_count": unique_count,
+        "exact_duplicate_packet_excess": max(0, len(actions) - unique_count),
+        "identity_multiplicity_summary": [
+            {
+                "multiplicity": multiplicity,
+                "unique_identity_count": multiplicities[multiplicity],
+                "raw_packet_count": multiplicity * multiplicities[multiplicity],
+            }
+            for multiplicity in sorted(multiplicities)
+        ],
+        "duplicate_packet_identities": duplicate_identities,
+    }
+    return normalized_actions, summary
+
+
 def _action_activity_summary(
     actions: list[dict[str, Any]],
     duration_ms: int | None,
     players_by_number: dict[int, str],
+    *,
+    metric_lane: str,
 ) -> list[dict[str, Any]]:
     timestamps_by_player: dict[int, list[int]] = defaultdict(list)
     types_by_player: dict[int, Counter[str]] = defaultdict(Counter)
@@ -476,7 +549,7 @@ def _action_activity_summary(
             {
                 "player_number": number,
                 "player_name": players_by_number.get(number),
-                "directly_attributed_action_count": action_count,
+                "action_packet_count": action_count,
                 "action_type_counts": {
                     action_type: types_by_player[number][action_type]
                     for action_type in sorted(types_by_player[number])
@@ -490,14 +563,85 @@ def _action_activity_summary(
                 "active_minute_count": len(minute_buckets),
                 "peak_actions_in_one_minute": max(minute_buckets.values()),
                 "largest_recorded_action_gap_ms": max(gaps) if gaps else None,
-                "recorded_eapm": recorded_rate,
-                "recorded_eapm_formula": (
+                "eapm": recorded_rate,
+                "eapm_formula": (
                     "round(non-AI actions carrying player_id / replay duration minutes)"
                 ),
+                "metric_lane": metric_lane,
+                "normalization": (
+                    "exact_packet_identity_first_occurrence"
+                    if metric_lane == "experimental_exact_packet_identity_normalized"
+                    else "none_raw_packet_lane"
+                ),
+                "metric_interpretation": (
+                    "parsed packet-rate diagnostic; not validated effective gameplay APM"
+                ),
+                "validated_gameplay_truth": False,
                 "provenance_class": PROVENANCE_DERIVED,
             }
         )
     return result
+
+
+def _resignation_lanes(
+    actions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return raw resignation packets and one earliest semantic event per player."""
+    raw_timeline = [
+        {
+            "ordinal": action.get("ordinal"),
+            "timestamp_ms": action.get("timestamp_ms"),
+            "player_number": action.get("player_number"),
+            "player_name": action.get("player_name"),
+            "packet_identity_sha256": action.get("packet_identity_sha256"),
+        }
+        for action in actions
+        if action.get("type") == "resign"
+    ]
+    by_player: dict[tuple[str, Any], list[dict[str, Any]]] = defaultdict(list)
+    for event in raw_timeline:
+        player_number = _integer(event.get("player_number"))
+        player_name = _clean_text(event.get("player_name"))
+        if player_number is not None:
+            key = ("number", player_number)
+        elif player_name:
+            key = ("name", player_name.casefold())
+        else:
+            # A packet with no player identity remains in the raw evidence lane;
+            # it cannot safely become a player-level semantic resignation.
+            continue
+        by_player[key].append(event)
+
+    semantic_timeline = []
+    for events in by_player.values():
+        earliest = min(
+            events,
+            key=lambda event: (
+                event.get("timestamp_ms") is None,
+                event.get("timestamp_ms") or 0,
+                event.get("ordinal") or 0,
+            ),
+        )
+        semantic_timeline.append(
+            {
+                "timestamp_ms": earliest.get("timestamp_ms"),
+                "player_number": earliest.get("player_number"),
+                "player_name": earliest.get("player_name"),
+                "earliest_raw_ordinal": earliest.get("ordinal"),
+                "raw_packet_count_for_player": len(events),
+                "provenance_class": PROVENANCE_DERIVED,
+            }
+        )
+    semantic_timeline.sort(
+        key=lambda event: (
+            event.get("timestamp_ms") is None,
+            event.get("timestamp_ms") or 0,
+            event.get("player_number") is None,
+            event.get("player_number") or 0,
+            str(event.get("player_name") or "").casefold(),
+        )
+    )
+    return raw_timeline, semantic_timeline
 
 
 def capture_summary_evidence(summary_obj: Any) -> dict[str, Any]:
@@ -606,17 +750,12 @@ def capture_summary_evidence(summary_obj: Any) -> dict[str, Any]:
         for item in initial_objects
     )
 
+    identity_normalized_actions, packet_identity = _annotate_action_packet_identities(
+        action_stream
+    )
     duration_ms = _integer(getattr(summary_obj, "get_duration")())
     type_counts = Counter(action.get("type") for action in action_stream)
-    resignations = [
-        {
-            "timestamp_ms": action["timestamp_ms"],
-            "player_number": action["player_number"],
-            "player_name": action["player_name"],
-        }
-        for action in action_stream
-        if action.get("type") == "resign"
-    ]
+    raw_resignations, semantic_resignations = _resignation_lanes(action_stream)
     age_up_commands = []
     market_commands = []
     tribute_commands = []
@@ -713,7 +852,12 @@ def capture_summary_evidence(summary_obj: Any) -> dict[str, Any]:
             ],
         },
         "initial_objects": {
+            "snapshot_scope": "mgz_initial_header_objects_only",
             "object_count": len(initial_objects),
+            "object_count_semantics": (
+                "mgz-filtered initial header object records after annex de-duplication; "
+                "not units or buildings created during gameplay"
+            ),
             "object_type_counts": [
                 {
                     "object_id": object_id,
@@ -730,23 +874,54 @@ def capture_summary_evidence(summary_obj: Any) -> dict[str, Any]:
                 )
             ],
             "objects": initial_objects,
-            "town_center_count": _integer(raw_objects.get("tcs")) if isinstance(raw_objects, dict) else None,
-            "stone_walls": raw_objects.get("stone_walls") if isinstance(raw_objects, dict) else None,
-            "palisade_walls": raw_objects.get("palisade_walls") if isinstance(raw_objects, dict) else None,
+            "max_starting_town_centers_per_player": (
+                _integer(raw_objects.get("tcs"))
+                if isinstance(raw_objects, dict)
+                else None
+            ),
+            "town_center_metric_semantics": (
+                "maximum initial Town Center count assigned to any one player; "
+                "not a total Town Center count"
+            ),
+            "starting_stone_wall_presence": (
+                raw_objects.get("stone_walls")
+                if isinstance(raw_objects, dict)
+                else None
+            ),
+            "starting_palisade_wall_presence": (
+                raw_objects.get("palisade_walls")
+                if isinstance(raw_objects, dict)
+                else None
+            ),
+            "wall_metric_semantics": (
+                "mgz initial-header wall presence hints; not completed map classification"
+            ),
         },
         "actions": {
             "available": True,
             "count": len(action_stream),
+            "stream_semantics": (
+                "immutable parsed packet order including repeated exact packets"
+            ),
             "type_counts": {
                 str(action_type): type_counts[action_type]
                 for action_type in sorted(type_counts)
             },
-            "activity_by_player": _action_activity_summary(
+            **packet_identity,
+            "raw_activity_by_player": _action_activity_summary(
                 action_stream,
                 duration_ms,
                 players_by_number,
+                metric_lane="raw_parsed_action_packets",
             ),
-            "resignation_timeline": resignations,
+            "identity_normalized_activity_by_player": _action_activity_summary(
+                identity_normalized_actions,
+                duration_ms,
+                players_by_number,
+                metric_lane="experimental_exact_packet_identity_normalized",
+            ),
+            "raw_resignation_timeline": raw_resignations,
+            "resignation_timeline": semantic_resignations,
             "age_up_research_commands": age_up_commands,
             "market_commands": market_commands,
             "tribute_commands": tribute_commands,
@@ -803,26 +978,42 @@ def capture_model_evidence(match: Any) -> dict[str, Any]:
         duration_ms = int(round(duration.total_seconds() * 1000))
     except Exception:
         duration_ms = None
+    identity_normalized_actions, packet_identity = _annotate_action_packet_identities(
+        actions
+    )
+    raw_resignations, semantic_resignations = _resignation_lanes(actions)
     counts = Counter(action["type"] for action in actions)
     return {
         "dataset": {},
         "diplomacy": {},
         "map_snapshot": {},
-        "initial_objects": {"object_count": 0, "objects": []},
+        "initial_objects": {
+            "snapshot_scope": "unavailable_in_model_fallback",
+            "object_count": None,
+            "objects": [],
+        },
         "actions": {
             "available": True,
             "count": len(actions),
+            "stream_semantics": (
+                "immutable parsed packet order including repeated exact packets"
+            ),
             "type_counts": {key: counts[key] for key in sorted(counts)},
-            "activity_by_player": _action_activity_summary(actions, duration_ms, players_by_number),
-            "resignation_timeline": [
-                {
-                    "timestamp_ms": action["timestamp_ms"],
-                    "player_number": action["player_number"],
-                    "player_name": action["player_name"],
-                }
-                for action in actions
-                if action["type"] == "resign"
-            ],
+            **packet_identity,
+            "raw_activity_by_player": _action_activity_summary(
+                actions,
+                duration_ms,
+                players_by_number,
+                metric_lane="raw_parsed_action_packets",
+            ),
+            "identity_normalized_activity_by_player": _action_activity_summary(
+                identity_normalized_actions,
+                duration_ms,
+                players_by_number,
+                metric_lane="experimental_exact_packet_identity_normalized",
+            ),
+            "raw_resignation_timeline": raw_resignations,
+            "resignation_timeline": semantic_resignations,
             "age_up_research_commands": [],
             "market_commands": [],
             "tribute_commands": [],
@@ -877,7 +1068,12 @@ def build_observations(
         observations.append(_observation(field, value, provenance, source, **kwargs))
 
     add("game.version", projection.get("game_version"), PROVENANCE_DIRECT_HEADER, "mgz.header.version")
-    add("game.type", projection.get("game_type"), PROVENANCE_DIRECT_HEADER, "mgz.header.game_version")
+    add(
+        "game.type",
+        projection.get("game_type"),
+        PROVENANCE_DIRECT_HEADER,
+        "mgz.summary.settings.type",
+    )
     add("game.duration_seconds", projection.get("duration"), PROVENANCE_DERIVED, "mgz.summary.duration_ms_normalized")
     completion_provenance = PROVENANCE_DIRECT_POSTGAME if postgame_available else PROVENANCE_DERIVED
     add("game.completed", bool(projection.get("completed")), completion_provenance, "mgz.summary.get_completed")
@@ -1008,9 +1204,49 @@ def build_observations(
     actions_available = bool(actions) and actions.get("available") is not False
     action_provenance = PROVENANCE_DIRECT_ACTION if actions_available else PROVENANCE_ABSENT
     add("actions.raw_count", actions.get("count") if actions_available else None, action_provenance, "mgz.summary.actions", exact=actions_available)
+    add(
+        "actions.unique_packet_identity_count",
+        actions.get("unique_action_identity_count") if actions_available else None,
+        PROVENANCE_DERIVED if actions_available else PROVENANCE_ABSENT,
+        "aoe2war.canonical_action_packet_identity_v1",
+        exact=actions_available,
+    )
+    add(
+        "actions.exact_duplicate_packet_excess",
+        actions.get("exact_duplicate_packet_excess") if actions_available else None,
+        PROVENANCE_DERIVED if actions_available else PROVENANCE_ABSENT,
+        "aoe2war.canonical_action_packet_identity_v1",
+        exact=actions_available,
+    )
     add("actions.type_counts", actions.get("type_counts", {}) if actions_available else None, action_provenance, "mgz.summary.actions", exact=actions_available)
-    add("actions.activity_by_player", actions.get("activity_by_player", []) if actions_available else None, PROVENANCE_DERIVED if actions_available else PROVENANCE_ABSENT, "aoe2war.recorded_action_activity", exact=False)
-    add("actions.resignation_timeline", actions.get("resignation_timeline", []) if actions_available else None, action_provenance, "mgz.action.resign", exact=actions_available)
+    add(
+        "actions.raw_activity_by_player",
+        actions.get("raw_activity_by_player", []) if actions_available else None,
+        PROVENANCE_DERIVED if actions_available else PROVENANCE_ABSENT,
+        "aoe2war.raw_recorded_action_activity",
+        exact=False,
+    )
+    add(
+        "actions.identity_normalized_activity_by_player",
+        actions.get("identity_normalized_activity_by_player", []) if actions_available else None,
+        PROVENANCE_INFERRED_REVIEW_ONLY if actions_available else PROVENANCE_ABSENT,
+        "aoe2war.experimental_exact_packet_identity_normalization",
+        exact=False,
+    )
+    add(
+        "actions.raw_resignation_timeline",
+        actions.get("raw_resignation_timeline", []) if actions_available else None,
+        action_provenance,
+        "mgz.action.resign.raw_packets",
+        exact=actions_available,
+    )
+    add(
+        "actions.resignation_timeline",
+        actions.get("resignation_timeline", []) if actions_available else None,
+        PROVENANCE_DERIVED if actions_available else PROVENANCE_ABSENT,
+        "aoe2war.earliest_resignation_per_player",
+        exact=False,
+    )
     add("actions.age_up_research_commands", actions.get("age_up_research_commands", []) if actions_available else None, action_provenance, "mgz.action.research", exact=False)
     add("actions.market_commands", actions.get("market_commands", []) if actions_available else None, action_provenance, "mgz.action.buy_sell", exact=actions_available)
     add("actions.tribute_commands", actions.get("tribute_commands", []) if actions_available else None, action_provenance, "mgz.action.tribute", exact=actions_available)
@@ -1054,7 +1290,13 @@ def build_candidate_envelope(
         "available": False,
         "count": None,
         "type_counts": {},
-        "activity_by_player": [],
+        "unique_action_identity_count": None,
+        "exact_duplicate_packet_excess": None,
+        "identity_multiplicity_summary": [],
+        "duplicate_packet_identities": [],
+        "raw_activity_by_player": [],
+        "identity_normalized_activity_by_player": [],
+        "raw_resignation_timeline": [],
         "resignation_timeline": [],
         "age_up_research_commands": [],
         "market_commands": [],
@@ -1153,21 +1395,44 @@ def compact_candidate_receipt(candidate: dict[str, Any]) -> dict[str, Any]:
         "changes_effective_truth": False,
         "observation_count": len(candidate.get("observations") or []),
         "raw_action_count": actions.get("count"),
+        "unique_action_identity_count": actions.get("unique_action_identity_count"),
+        "exact_duplicate_packet_excess": actions.get("exact_duplicate_packet_excess"),
+        "identity_multiplicity_summary": actions.get("identity_multiplicity_summary") or [],
         "action_type_counts": actions.get("type_counts") or {},
         "recorded_evidence": {
             "dataset": evidence.get("dataset") or {},
             "diplomacy": evidence.get("diplomacy") or {},
             "map_snapshot": evidence.get("map_snapshot") or {},
             "initial_objects": {
+                "snapshot_scope": initial_objects.get("snapshot_scope"),
                 "object_count": initial_objects.get("object_count"),
+                "object_count_semantics": initial_objects.get("object_count_semantics"),
                 "object_type_counts": initial_objects.get("object_type_counts") or [],
-                "town_center_count": initial_objects.get("town_center_count"),
-                "stone_walls": initial_objects.get("stone_walls"),
-                "palisade_walls": initial_objects.get("palisade_walls"),
+                "max_starting_town_centers_per_player": initial_objects.get(
+                    "max_starting_town_centers_per_player"
+                ),
+                "town_center_metric_semantics": initial_objects.get(
+                    "town_center_metric_semantics"
+                ),
+                "starting_stone_wall_presence": initial_objects.get(
+                    "starting_stone_wall_presence"
+                ),
+                "starting_palisade_wall_presence": initial_objects.get(
+                    "starting_palisade_wall_presence"
+                ),
+                "wall_metric_semantics": initial_objects.get("wall_metric_semantics"),
             },
-            "activity_by_player": actions.get("activity_by_player") or [],
+            "raw_activity_by_player": actions.get("raw_activity_by_player") or [],
+            "identity_normalized_activity_by_player": (
+                actions.get("identity_normalized_activity_by_player") or []
+            ),
             "resignation_count": (
                 len(actions.get("resignation_timeline") or [])
+                if actions_available
+                else None
+            ),
+            "raw_resignation_packet_count": (
+                len(actions.get("raw_resignation_timeline") or [])
                 if actions_available
                 else None
             ),
@@ -1200,7 +1465,8 @@ def compact_candidate_receipt(candidate: dict[str, Any]) -> dict[str, Any]:
 
     if len(_canonical_json(receipt).encode("utf-8")) > MAX_COMPACT_RECEIPT_JSON_BYTES:
         recorded = receipt["recorded_evidence"]
-        recorded["activity_by_player"] = []
+        recorded["raw_activity_by_player"] = []
+        recorded["identity_normalized_activity_by_player"] = []
         recorded["activity_summary_lane"] = "candidate_output_only"
         receipt["receipt_truncated"] = True
 
@@ -1226,6 +1492,11 @@ def compact_candidate_receipt(candidate: dict[str, Any]) -> dict[str, Any]:
             ),
             "resignation_count": (
                 len(actions.get("resignation_timeline") or [])
+                if actions_available
+                else None
+            ),
+            "raw_resignation_packet_count": (
+                len(actions.get("raw_resignation_timeline") or [])
                 if actions_available
                 else None
             ),

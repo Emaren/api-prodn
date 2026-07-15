@@ -40,10 +40,11 @@ def test_explicit_2v2_3v3_and_4v4_resolve_independent_of_player_order():
         assert normal["status"] == "resolved"
         assert normal["format"] == f"{size}v{size}"
         assert normal["teams"] == reversed_result["teams"]
-        assert normal["winning_team_id"] == 0
-        assert normal["winning_player_keys"] == normal["teams"][0]["player_keys"]
-        assert normal["result_status"] == "resolved"
+        assert normal["winning_team_id"] is None
+        assert normal["winning_player_keys"] == []
+        assert normal["result_status"] == "review_required"
         assert normal["result_trusted"] is False
+        assert normal["result_evidence"]["winner_flag_team_id"] == 0
 
 
 def test_team_games_fail_closed_without_two_complete_equal_explicit_teams():
@@ -67,7 +68,19 @@ def test_winning_team_requires_every_winner_and_every_loser_flag():
 
 
 def test_contract_embeds_resolution_in_key_events():
-    stats = apply_replay_team_contract({"players": team_players(2), "key_events": {}}, final=True)
+    stats = apply_replay_team_contract(
+        {
+            "players": team_players(2),
+            "completed": True,
+            "completion_source": "resignation",
+            "key_events": {
+                "completed": True,
+                "completion_source": "resignation",
+                "resigned_player_numbers": [2, 4],
+            },
+        },
+        final=True,
+    )
     assert stats["team_resolution"]["format"] == "2v2"
     assert stats["key_events"]["team_resolution"] == stats["team_resolution"]
     assert stats["winning_team_id"] == 0
@@ -122,11 +135,79 @@ def test_first_team_resignation_is_display_evidence_not_settlement_proof():
         },
     )
 
-    assert result["winning_player_names"] == ["Alpha", "Bravo"]
-    assert result["result_status"] == "resolved"
-    assert result["result_confidence"] == "medium"
+    assert result["winning_team_id"] is None
+    assert result["winning_player_names"] == []
+    assert result["result_status"] == "review_required"
+    assert result["result_confidence"] == "review"
     assert result["result_trusted"] is False
     assert result["result_evidence"]["complete_losing_team_resignation"] is False
+    assert result["result_evidence"]["partially_resigned_team_ids"] == [1]
+
+    stats = apply_replay_team_contract(
+        {
+            "players": players,
+            "completed": True,
+            "completion_source": "resignation",
+            "key_events": {
+                "completed": True,
+                "completion_source": "resignation",
+                "resigned_player_numbers": [3],
+            },
+        },
+        final=True,
+    )
+    assert stats["completed"] is False
+    assert stats["key_events"]["raw_mgz_completed_signal"] is True
+    assert stats["key_events"]["resignation_proves_team_completion"] is False
+    assert stats["completion_source"] == "team_resignation_review_required"
+
+
+def test_exactly_one_fully_resigned_team_derives_opponent_without_winner_flags():
+    players = [
+        {"name": "Alpha", "number": 1, "team_id": 0, "winner": None},
+        {"name": "Bravo", "number": 2, "team_id": 0, "winner": None},
+        {"name": "Charlie", "number": 3, "team_id": 1, "winner": None},
+        {"name": "Delta", "number": 4, "team_id": 1, "winner": None},
+    ]
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={"resigned_player_numbers": [3, 4]},
+    )
+
+    assert result["winning_team_id"] == 0
+    assert result["winning_player_names"] == ["Alpha", "Bravo"]
+    assert result["result_trusted"] is True
+    assert result["result_provenance"] == "complete_losing_team_resignation"
+    assert result["result_evidence"]["winner_flags_coherent"] is False
+    assert result["result_evidence"]["fully_resigned_team_ids"] == [1]
+
+
+def test_both_fully_resigned_teams_and_conflicting_evidence_stay_review_only():
+    players = [
+        {"name": "Alpha", "number": 1, "team_id": 0, "winner": True},
+        {"name": "Bravo", "number": 2, "team_id": 0, "winner": True},
+        {"name": "Charlie", "number": 3, "team_id": 1, "winner": False},
+        {"name": "Delta", "number": 4, "team_id": 1, "winner": False},
+    ]
+    both = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={"resigned_player_numbers": [1, 2, 3, 4]},
+    )
+    assert both["winning_team_id"] is None
+    assert both["result_status"] == "review_required"
+    assert both["result_provenance"] == "conflicting_result_evidence"
+    assert both["result_evidence"]["resignation_state"] == "multiple_complete_teams"
+
+    conflict = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={"resigned_player_numbers": [1, 2]},
+    )
+    assert conflict["winning_team_id"] is None
+    assert conflict["result_status"] == "review_required"
+    assert conflict["result_evidence"]["resignation_result_conflict"] is True
 
 
 def test_golden_hd_no_resignation_keeps_result_unresolved():
@@ -147,5 +228,5 @@ def test_golden_hd_no_resignation_keeps_result_unresolved():
 
     assert result["winning_team_id"] is None
     assert result["winning_player_keys"] == []
-    assert result["result_status"] == "unresolved"
+    assert result["result_status"] == "review_required"
     assert result["result_trusted"] is False

@@ -15,6 +15,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from utils.replay_engine import (  # noqa: E402
     PARSER_IMPLEMENTATION,
     PARSER_PASS_NAME,
+    PARSER_PASS_VERSION,
+    PARSER_SCHEMA_VERSION,
     MAX_COMPACT_RECEIPT_JSON_BYTES,
     PROVENANCE_ABSENT,
     PROVENANCE_DIRECT_ACTION,
@@ -83,8 +85,8 @@ def test_parser_pass_identity_is_explicit_and_idempotent():
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"]
-    assert identity["pass_version"]
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-15.2"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "2"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 
@@ -232,6 +234,9 @@ def test_hd58_golden_candidates_match_exact_byte_evidence(golden_candidates):
         assert candidate["candidate"]["changes_effective_truth"] is False
 
         assert [player["name"] for player in projection["players"]] == expected["players"]
+        assert projection["game_type"] == expected["game_type"]
+        assert projection["game_type"] == projection["key_events"]["settings"]["type"]
+        assert not projection["game_type"].startswith("(")
         assert result["format"] == expected["format"]
         assert [team["players"] for team in result["teams"]] == expected["teams"]
         assert result["result_trusted"] is expected["result_trusted"]
@@ -244,6 +249,41 @@ def test_hd58_golden_candidates_match_exact_byte_evidence(golden_candidates):
 
         assert candidate["actions"]["count"] == expected["raw_action_count"]
         assert len(candidate["actions"]["stream"]) == expected["raw_action_count"]
+        assert candidate["actions"]["unique_action_identity_count"] == expected[
+            "unique_action_identity_count"
+        ]
+        assert candidate["actions"]["exact_duplicate_packet_excess"] == expected[
+            "exact_duplicate_packet_excess"
+        ]
+        assert (
+            candidate["actions"]["unique_action_identity_count"]
+            + candidate["actions"]["exact_duplicate_packet_excess"]
+            == candidate["actions"]["count"]
+        )
+        assert max(
+            row["multiplicity"]
+            for row in candidate["actions"]["identity_multiplicity_summary"]
+        ) == expected["maximum_action_identity_multiplicity"]
+        assert all(
+            len(action["packet_identity_sha256"]) == 64
+            for action in candidate["actions"]["stream"]
+        )
+        assert sum(
+            activity["action_packet_count"]
+            for activity in candidate["actions"]["raw_activity_by_player"]
+        ) == expected["raw_attributed_action_count"]
+        assert sum(
+            activity["action_packet_count"]
+            for activity in candidate["actions"][
+                "identity_normalized_activity_by_player"
+            ]
+        ) == expected["identity_normalized_attributed_action_count"]
+        assert len(candidate["actions"]["raw_resignation_timeline"]) == expected[
+            "raw_resignation_packet_count"
+        ]
+        assert len(candidate["actions"]["resignation_timeline"]) == expected[
+            "semantic_resignation_count"
+        ]
         assert candidate["evidence"]["chat"]["count"] == expected[
             "chat_message_count"
         ]
@@ -258,6 +298,86 @@ def test_hd58_golden_candidates_match_exact_byte_evidence(golden_candidates):
         assert candidate["evidence"]["initial_objects"]["object_count"] == expected[
             "initial_object_count"
         ]
+        assert candidate["evidence"]["initial_objects"][
+            "max_starting_town_centers_per_player"
+        ] == expected["max_starting_town_centers_per_player"]
+        assert candidate["evidence"]["initial_objects"]["snapshot_scope"] == (
+            "mgz_initial_header_objects_only"
+        )
+        assert "not units or buildings created during gameplay" in candidate[
+            "evidence"
+        ]["initial_objects"]["object_count_semantics"]
+
+
+def test_game_type_uses_normalized_settings_and_never_summary_version_tuple(
+    golden_candidates,
+    monkeypatch,
+):
+    from mgz.summary.full import FullSummary
+
+    manifest, _candidates = golden_candidates
+    expected = manifest[0]
+
+    def fail_if_called(_summary):
+        raise AssertionError("Summary.get_version is not an HD game-type source")
+
+    monkeypatch.setattr(FullSummary, "get_version", fail_if_called)
+    candidate = parse_replay_candidate_bytes(
+        expected["filename"],
+        _golden_path(expected).read_bytes(),
+    )
+
+    assert candidate["run"]["status"] == "succeeded"
+    assert candidate["projection"]["game_type"] == expected["game_type"]
+
+
+def test_action_packet_identities_and_semantic_resignations_are_deterministic(
+    golden_candidates,
+):
+    _manifest, candidates = golden_candidates
+    for candidate in candidates.values():
+        actions = candidate["actions"]
+        identity_fields = actions["identity_fields"]
+        for action in actions["stream"]:
+            identity_material = {
+                field: action.get(field)
+                for field in identity_fields
+            }
+            expected_identity = hashlib.sha256(
+                json.dumps(
+                    identity_material,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            assert action["packet_identity_sha256"] == expected_identity
+
+        raw_by_player = {}
+        for event in actions["raw_resignation_timeline"]:
+            raw_by_player.setdefault(event["player_number"], []).append(event)
+        assert len(actions["resignation_timeline"]) == len(raw_by_player)
+        for event in actions["resignation_timeline"]:
+            raw_events = raw_by_player[event["player_number"]]
+            earliest = min(
+                raw_events,
+                key=lambda raw: (raw["timestamp_ms"], raw["ordinal"]),
+            )
+            assert event["timestamp_ms"] == earliest["timestamp_ms"]
+            assert event["earliest_raw_ordinal"] == earliest["ordinal"]
+            assert event["raw_packet_count_for_player"] == len(raw_events)
+
+        assert all(
+            activity["metric_lane"] == "raw_parsed_action_packets"
+            and activity["validated_gameplay_truth"] is False
+            for activity in actions["raw_activity_by_player"]
+        )
+        assert all(
+            activity["metric_lane"]
+            == "experimental_exact_packet_identity_normalized"
+            and activity["validated_gameplay_truth"] is False
+            for activity in actions["identity_normalized_activity_by_player"]
+        )
 
 
 def test_team_golden_keeps_complete_winner_and_direct_action_provenance(golden_candidates):
@@ -270,6 +390,7 @@ def test_team_golden_keeps_complete_winner_and_direct_action_provenance(golden_c
     assert result["result_provenance"] == "complete_losing_team_resignation"
     assert result["result_trusted"] is True
 
+    assert candidate["actions"]["raw_resignation_timeline"]
     assert candidate["actions"]["resignation_timeline"]
     assert candidate["actions"]["age_up_research_commands"]
     assert all(
@@ -287,7 +408,7 @@ def test_team_golden_keeps_complete_winner_and_direct_action_provenance(golden_c
     assert queue_command["payload"]["labels"]["unit"]
     assert all(
         activity["command_family_counts"]["production_queue_command"] > 0
-        for activity in candidate["actions"]["activity_by_player"]
+        for activity in candidate["actions"]["raw_activity_by_player"]
     )
 
 
@@ -377,9 +498,14 @@ def test_compact_receipt_preserves_safe_metrics_without_hot_action_stream(golden
 
     assert receipt == candidate["projection"]["key_events"]["parser_engine"]
     assert receipt["raw_action_count"] == 5860
+    assert receipt["unique_action_identity_count"] == 3944
+    assert receipt["exact_duplicate_packet_excess"] == 1916
     assert receipt["recorded_evidence"]["map_snapshot"]["tile_count"] == 28224
     assert receipt["recorded_evidence"]["initial_objects"]["object_count"] == 366
-    assert receipt["recorded_evidence"]["activity_by_player"]
+    assert receipt["recorded_evidence"]["raw_activity_by_player"]
+    assert receipt["recorded_evidence"]["identity_normalized_activity_by_player"]
+    assert receipt["recorded_evidence"]["resignation_count"] == 2
+    assert receipt["recorded_evidence"]["raw_resignation_packet_count"] == 5
     assert receipt["recorded_evidence"]["age_up_research_command_count"] > 0
     assert receipt["recorded_evidence"]["market_command_count"] > 0
     assert receipt["recorded_evidence"]["tribute_command_count"] >= 0
@@ -402,15 +528,20 @@ def test_compact_receipt_enforces_size_ceiling_for_oversized_summaries(
     candidate = copy.deepcopy(
         candidates["MP Replay v5.8 @2026.07.06 182842 (1).aoe2record"]
     )
-    candidate["actions"]["activity_by_player"] = [
+    candidate["actions"]["raw_activity_by_player"] = [
         {"player_number": number, "synthetic_summary": "x" * 10_000}
+        for number in range(32)
+    ]
+    candidate["actions"]["identity_normalized_activity_by_player"] = [
+        {"player_number": number, "synthetic_summary": "y" * 10_000}
         for number in range(32)
     ]
 
     receipt = compact_candidate_receipt(candidate)
 
     assert receipt["receipt_truncated"] is True
-    assert receipt["recorded_evidence"]["activity_by_player"] == []
+    assert receipt["recorded_evidence"]["raw_activity_by_player"] == []
+    assert receipt["recorded_evidence"]["identity_normalized_activity_by_player"] == []
     assert len(canonical_candidate_json(receipt).encode("utf-8")) <= MAX_COMPACT_RECEIPT_JSON_BYTES
 
 
