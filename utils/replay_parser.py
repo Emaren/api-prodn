@@ -11,6 +11,12 @@ import uuid
 from mgz import const, header, summary
 from mgz.model import parse_match
 from utils.extract_datetime import extract_datetime_from_filename
+from utils.replay_engine import (
+    build_candidate_envelope,
+    capture_model_evidence,
+    capture_summary_evidence,
+    normalize_failure_signature,
+)
 from utils.replay_team_contract import apply_replay_team_contract
 
 
@@ -167,7 +173,6 @@ async def parse_replay_full(replay_path, apply_hd_early_exit_rules=True):
         async with aiofiles.open(replay_path, "rb") as f:
             file_bytes = await f.read()
 
-        # Use thread to safely run blocking mgz sync logic
         parsed = await asyncio.to_thread(
             _parse_sync_bytes,
             replay_path,
@@ -179,6 +184,92 @@ async def parse_replay_full(replay_path, apply_hd_early_exit_rules=True):
     except Exception as e:
         logging.error(f"❌ parse error: {e}")
         return None
+
+
+async def parse_replay_candidate(replay_path, apply_hd_early_exit_rules=True):
+    """Return the immutable candidate envelope used by future parser workers."""
+    if not os.path.exists(replay_path):
+        logging.error(f"❌ Replay not found: {replay_path}")
+        return build_candidate_envelope(
+            replay_path=replay_path,
+            file_bytes=None,
+            projection=None,
+            evidence=None,
+            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+            parse_mode="artifact_io_failed",
+            failure=normalize_failure_signature(
+                FileNotFoundError("replay artifact path does not exist"),
+                stage="artifact_read",
+            ),
+        )
+
+    try:
+        async with aiofiles.open(replay_path, "rb") as replay_file:
+            file_bytes = await replay_file.read()
+    except Exception as error:
+        failure = normalize_failure_signature(error, stage="artifact_read")
+        logging.error("❌ candidate artifact read error: %s", failure["signature"])
+        return build_candidate_envelope(
+            replay_path=replay_path,
+            file_bytes=None,
+            projection=None,
+            evidence=None,
+            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+            parse_mode="artifact_io_failed",
+            failure=failure,
+        )
+
+    try:
+        return await asyncio.to_thread(
+            parse_replay_candidate_bytes,
+            replay_path,
+            file_bytes,
+            apply_hd_early_exit_rules,
+        )
+    except Exception as error:
+        failure = normalize_failure_signature(error, stage="candidate_build")
+        logging.error("❌ candidate generation error: %s", failure["signature"])
+        return build_candidate_envelope(
+            replay_path=replay_path,
+            file_bytes=file_bytes,
+            projection=None,
+            evidence=None,
+            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+            parse_mode="candidate_generation_failed",
+            failure=failure,
+        )
+
+
+def parse_replay_candidate_bytes(
+    replay_path,
+    file_bytes,
+    apply_hd_early_exit_rules=True,
+):
+    """Parse replay bytes into a deterministic, candidate-only run envelope."""
+    parsed, parse_diagnostic, parse_mode = _parse_sync_bytes_with_diagnostics(
+        replay_path,
+        file_bytes,
+        apply_hd_early_exit_rules,
+        capture_engine_evidence=True,
+    )
+    if isinstance(parsed, dict):
+        evidence = parsed.pop("_engine_evidence", None)
+        evidence_failure = parsed.pop("_engine_evidence_failure", None)
+        parsed = apply_replay_team_contract(parsed)
+        diagnostic = parse_diagnostic or evidence_failure
+    else:
+        evidence = None
+        diagnostic = parse_diagnostic
+
+    return build_candidate_envelope(
+        replay_path=replay_path,
+        file_bytes=file_bytes,
+        projection=parsed,
+        evidence=evidence,
+        apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+        parse_mode=parse_mode,
+        failure=diagnostic,
+    )
 
 
 def _extract_event_types(summary_obj):
@@ -834,7 +925,13 @@ def _safe_match_team_id(team_id):
         return None
 
 
-def _parse_match_live_fallback_bytes(replay_path, file_bytes, parse_error):
+def _parse_match_live_fallback_bytes(
+    replay_path,
+    file_bytes,
+    parse_error,
+    *,
+    capture_engine_evidence=False,
+):
     try:
         match = parse_match(io.BytesIO(file_bytes))
     except Exception as fallback_error:
@@ -949,6 +1046,15 @@ def _parse_match_live_fallback_bytes(replay_path, file_bytes, parse_error):
         "played_on": dt.isoformat() if dt else None,
     }
 
+    if capture_engine_evidence:
+        try:
+            stats["_engine_evidence"] = capture_model_evidence(match)
+        except Exception as evidence_error:
+            stats["_engine_evidence_failure"] = normalize_failure_signature(
+                evidence_error,
+                stage="model_evidence",
+            )
+
     logging.warning(
         "⚠️ parse_match live fallback used for %s after summary parse failed: %s",
         replay_path,
@@ -957,10 +1063,18 @@ def _parse_match_live_fallback_bytes(replay_path, file_bytes, parse_error):
     return stats
 
 
-def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
+def _parse_sync_bytes_with_diagnostics(
+    replay_path,
+    file_bytes,
+    apply_hd_early_exit_rules=True,
+    *,
+    capture_engine_evidence=False,
+):
     _patch_mgz_hd_type9_game_type()
+    stage = "header"
     try:
         h = header.parse(file_bytes)
+        stage = "summary"
         s = summary.Summary(io.BytesIO(file_bytes))
         completed = bool(s.get_completed())
         raw_chat = s.get_chat()
@@ -1096,18 +1210,51 @@ def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
         stats["played_on"] = dt.isoformat() if dt else None
         stats = _maybe_apply_hd_early_exit_rules(stats, apply_hd_early_exit_rules)
 
+        if capture_engine_evidence:
+            try:
+                stats["_engine_evidence"] = capture_summary_evidence(s)
+            except Exception as evidence_error:
+                logging.warning(
+                    "⚠️ parser-engine evidence extraction failed for %s: %s",
+                    replay_path,
+                    evidence_error,
+                )
+                stats["_engine_evidence_failure"] = normalize_failure_signature(
+                    evidence_error,
+                    stage="summary_evidence",
+                )
+
         logging.info(f"✅ parse_replay_full => {replay_path}")
-        return stats
+        return stats, None, "mgz_full_summary"
 
     except Exception as e:
         logging.error(f"❌ sync parse error: {e}")
-        live_fallback = _parse_match_live_fallback_bytes(replay_path, file_bytes, e)
+        diagnostic = normalize_failure_signature(e, stage=stage)
+        live_fallback = _parse_match_live_fallback_bytes(
+            replay_path,
+            file_bytes,
+            e,
+            capture_engine_evidence=capture_engine_evidence,
+        )
         if live_fallback:
             if apply_hd_early_exit_rules:
                 live_fallback["parse_reason"] = "hd_final_parse_match_fallback"
                 live_fallback.setdefault("key_events", {})["parse_match_final_fallback"] = True
-            return live_fallback
-        return _parse_header_only_bytes(replay_path, file_bytes, e)
+            return live_fallback, diagnostic, "mgz_parse_match_fallback"
+        header_fallback = _parse_header_only_bytes(replay_path, file_bytes, e)
+        if header_fallback:
+            return header_fallback, diagnostic, "mgz_header_only_fallback"
+        return None, diagnostic, "mgz_failed"
+
+
+def _parse_sync_bytes(replay_path, file_bytes, apply_hd_early_exit_rules=True):
+    """Backward-compatible internal projection parser."""
+    parsed, _diagnostic, _parse_mode = _parse_sync_bytes_with_diagnostics(
+        replay_path,
+        file_bytes,
+        apply_hd_early_exit_rules,
+    )
+    return parsed
 
 # ───────────────────────────────────────────────
 # 🔐 Async SHA256 Hash for replay file

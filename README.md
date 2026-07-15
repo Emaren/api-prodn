@@ -10,11 +10,15 @@ Trusted finality—not HTTP success—allows settlement. Disconnect/desync evide
 
 `utils/replay_team_contract.py` is the canonical replay-player boundary. It normalizes alternate parser names once and preserves replay-observed name, Steam ID, civilization, color, position, explicit team ID (including valid team `0`), player number, winner flag, score, rating snapshot, EAPM, and achievements when present. It never infers team membership from array order. Team games resolve only with exactly two complete equal-size explicit teams; a coherent team winner requires every winning-team flag true and every losing-team flag false. `winning_team_id`, `winning_player_keys`, result provenance, confidence, and evidence are stored in `key_events.result_resolution` alongside `key_events.team_resolution`. A coherent parser flag set can feed public stats, but team betting additionally requires trusted direct evidence: postgame/scoreboard truth or resignation by every member of the losing team. The legacy scalar `winner` field never establishes team settlement truth.
 
+`utils/replay_engine.py` is the additive Parser Engine Room boundary. One artifact hash plus parser implementation/version, schema version, pass version, and options produces one deterministic idempotency key. A run returns a candidate-only envelope containing provenance-bearing observations, map/terrain and initial-object evidence, the normalized direct action stream, research/age-up commands, market/tribute commands, resignation chronology, and documented recorded-action rates. `candidate.semantic_sha256` fingerprints that normalized evidence and parser identity; it is deliberately not a checksum of serialized or compressed output bytes. A storage worker must hash the exact stored object separately as its candidate-output hash. Reprocessing never promotes or deletes truth by itself. Candidate output contains a bounded receipt carrying identity, hashes, coverage, and safe summaries, but the production upload route remains projection-only and does not copy that receipt or the full evidence stream into hot `game_stats` JSONB. Workers persist complete candidate output on the mounted replay volume and normalized run/observation tables before any separate promotion decision.
+
+Parser failures are grouped by privacy-safe deterministic signatures (`stage`, category, exception class, normalized message fingerprint). Paths, upload IDs, byte offsets, and other unstable numbers are removed before grouping. A successful header or model fallback remains a recovered candidate and records the primary failure; it does not become stronger result evidence.
+
 Live/final iterations retain their own canonical player evidence in `game_stats`. The app-side session merger prefers complete identity/team fields, keeps earlier complete assignments when a later iteration is incomplete, and blocks conflicting assignments. Multiple watcher orderings are therefore harmless; conflicting team evidence is not. For a team final, `betting_eligible` additionally requires high-confidence teams and a coherent winning team.
 
 Identity precedence is platform match ID, watcher/session identity, normalized filename plus watcher session, then hash/fallback metadata. Parse attempts remain audit evidence while public views collapse iterations and duplicate watcher uploads into one canonical match.
 
-Fixture work belongs under `tests/`; private user replays are not committed. Coverage should include normal/resignation/disconnect finals, incomplete/live files, team games, repeated/multi-watcher iterations, corrupt/unsupported input, missing scoreboard, late finals, and batch duplicates.
+Fixture work belongs under `tests/`; private user replays are not committed. The six HD 5.8 golden files (the five supplied fixtures plus Jim's verified 4v4 regression replay) are pinned by filename, SHA-256, byte size, and expected evidence in `tests/fixtures/hd5_8_golden_manifest.json`. Set `AOE2_HD_GOLDEN_DIR` to the protected corpus directory to run byte-level golden tests. Coverage should include normal/resignation/disconnect finals, incomplete/live files, team games, repeated/multi-watcher iterations, corrupt/unsupported input, missing scoreboard, late finals, and batch duplicates.
 
 Production FastAPI backend for AoE2HDBets.
 
@@ -118,6 +122,40 @@ alembic upgrade head
 
 - `watch_replays.py` watches local replay folders and triggers parsing uploads
 - `parse_replay.py` parses replay files and sends JSON to configured API targets
+- `scripts/parse_replay_candidate.py` parses one local artifact directly into the
+  deterministic, candidate-only Parser Engine contract without HTTP or database
+  writes. Complete action/chat evidence is emitted to canonical JSON; the result
+  never promotes itself into effective game truth.
+
+Parse an ordinary replay to stdout:
+
+```bash
+python scripts/parse_replay_candidate.py \
+  "/path/to/MP Replay v5.8 @2026.07.06 182842.aoe2record"
+```
+
+Archive objects may be content-addressed. Supply the original replay name so
+filename-derived legacy metadata remains available, verify the immutable digest,
+and write the output atomically with private permissions:
+
+```bash
+python scripts/parse_replay_candidate.py \
+  /mnt/HC_Volume_105319120/aoe2-parser-engine/golden-fixtures/<sha256>.aoe2record \
+  --source-name "MP Replay v5.8 @2026.07.06 182842.aoe2record" \
+  --expected-sha256 <sha256> \
+  --output /mnt/HC_Volume_105319120/aoe2-parser-engine/jobs/manual/candidates/<sha256>.json
+```
+
+Use `--receipt-only` only for the compact hot-database receipt. A failed parse
+still emits structured JSON and exits with status `2`, allowing a worker to
+catalog stable failure signatures without scraping stderr.
+
+Historical manifests run through
+`scripts/run_replay_engine_room_job.py`; its plan mode is zero-write and its
+candidate mode is bounded, resumable, mounted-volume-backed, and never changes
+public truth. After a run, `scripts/report_replay_engine_room_job.py` verifies
+the stored candidate bytes again and writes the private per-game reconciliation
+equation. See `docs/REPLAY_ENGINE_ROOM_WORKER.md` for the production runbook.
 
 ## Deployment model
 
