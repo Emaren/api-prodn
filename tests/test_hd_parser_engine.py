@@ -35,6 +35,11 @@ MANIFEST_PATH = Path(__file__).parent / "fixtures" / "hd5_8_golden_manifest.json
 FRAGMENT_MANIFEST_PATH = (
     Path(__file__).parent / "fixtures" / "hd_fragment_golden_manifest.json"
 )
+METADATA_FRAGMENT_MANIFEST_PATH = (
+    Path(__file__).parent
+    / "fixtures"
+    / "hd_metadata_fragment_golden_manifest.json"
+)
 DEFAULT_GOLDEN_DIR = (
     Path.home()
     / "Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)"
@@ -66,6 +71,12 @@ def _golden_path(entry):
 
 def _fragment_manifest():
     return json.loads(FRAGMENT_MANIFEST_PATH.read_text(encoding="utf-8"))["fixtures"]
+
+
+def _metadata_fragment_manifest():
+    return json.loads(
+        METADATA_FRAGMENT_MANIFEST_PATH.read_text(encoding="utf-8")
+    )["fixtures"]
 
 
 def _fragment_golden_dir():
@@ -125,13 +136,39 @@ def fragment_golden_candidates():
     return manifest, candidates
 
 
+@pytest.fixture(scope="module")
+def metadata_fragment_golden_candidates():
+    manifest = _metadata_fragment_manifest()
+    missing = [
+        entry["filename"]
+        for entry in manifest
+        if not _fragment_golden_path(entry).is_file()
+    ]
+    if missing:
+        pytest.skip(
+            "HD metadata-fragment goldens are private immutable replay bytes; "
+            "set AOE2_HD_FRAGMENT_GOLDEN_DIR to run them"
+        )
+
+    candidates = {}
+    for expected in manifest:
+        path = _fragment_golden_path(expected)
+        file_bytes = path.read_bytes()
+        assert hashlib.sha256(file_bytes).hexdigest() == expected["sha256"]
+        candidates[expected["filename"]] = parse_replay_candidate_bytes(
+            expected["filename"],
+            file_bytes,
+        )
+    return manifest, candidates
+
+
 def test_parser_pass_identity_is_explicit_and_idempotent():
     identity = parser_identity(apply_hd_early_exit_rules=True)
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.1"
-    assert identity["pass_version"] == PARSER_PASS_VERSION == "3"
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.2"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "4"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 
@@ -311,6 +348,63 @@ def test_hd_fragment_goldens_recover_roster_diplomacy_and_bounded_body_truth(
             "raw_resignation_packet_count"
         ]
         assert len(actions.get("resignation_timeline") or []) == expected[
+            "semantic_resignation_count"
+        ]
+        assert candidate["candidate"]["changes_effective_truth"] is False
+
+
+def test_hd_metadata_fragment_goldens_recover_ai_slots_without_hiding_conflicts(
+    metadata_fragment_golden_candidates,
+):
+    manifest, candidates = metadata_fragment_golden_candidates
+    for expected in manifest:
+        candidate = candidates[expected["filename"]]
+        projection = candidate["projection"]
+        key_events = projection["key_events"]
+        actions = candidate["actions"]
+        resolution = projection["team_resolution"]
+
+        assert candidate["artifact"]["sha256"] == expected["sha256"]
+        assert candidate["artifact"]["byte_size"] == expected["byte_size"]
+        assert candidate["run"]["status"] == "recovered"
+        assert candidate["run"]["parse_mode"] == (
+            "mgz_hd_metadata_fragment_body_fallback"
+        )
+        assert key_events["header_fragment_boundary"] == (
+            "after_hd_platform_metadata"
+        )
+        assert key_events["player_number_source"] == "hd_metadata_slot_ordinal"
+        assert key_events["header_player_number_conflict_count"] == expected[
+            "player_number_conflict_count"
+        ]
+        assert [player["name"] for player in projection["players"]] == expected[
+            "players"
+        ]
+        assert [player["number"] for player in projection["players"]] == list(
+            range(1, len(expected["players"]) + 1)
+        )
+        assert projection["duration"] == expected["duration_seconds"]
+        assert projection["game_type"] == expected["game_type"]
+        assert projection["map"]["id"] == expected["map_id"]
+        assert projection["map"]["name"] == expected["map_name"]
+        assert resolution["status"] == expected["team_status"]
+        assert resolution["result_trusted"] is expected["result_trusted"]
+        assert key_events["body_stream_recovery"] is True
+        assert key_events["body_stream_complete"] is True
+        assert key_events["body_operation_count"] == expected[
+            "body_operation_count"
+        ]
+        assert actions["count"] == expected["raw_action_count"]
+        assert actions["unique_action_identity_count"] == expected[
+            "unique_action_identity_count"
+        ]
+        assert actions["exact_duplicate_packet_excess"] == expected[
+            "exact_duplicate_packet_excess"
+        ]
+        assert len(actions["raw_resignation_timeline"]) == expected[
+            "raw_resignation_packet_count"
+        ]
+        assert len(actions["resignation_timeline"]) == expected[
             "semantic_resignation_count"
         ]
         assert candidate["candidate"]["changes_effective_truth"] is False

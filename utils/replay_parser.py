@@ -32,6 +32,11 @@ _HD_FRAGMENT_PREFIX = Struct(
     "fragment_offset" / Tell,
     "fragment_tail" / GreedyBytes,
 )
+_HD_METADATA_PREFIX = Struct(
+    *compressed_header.subcons[:8],
+    "metadata_fragment_offset" / Tell,
+    "metadata_fragment_tail" / GreedyBytes,
+)
 
 
 def _patch_mgz_hd_type9_game_type():
@@ -1178,6 +1183,289 @@ def _parse_hd_fragment_header_body_bytes(
     return stats
 
 
+def _extract_hd_metadata_fragment_players(parsed_header):
+    hd = _safe_get(parsed_header, "hd")
+    declared_count = _safe_int(_safe_get(hd, "num_players")) or 0
+    raw_players = list(_safe_get(hd, "players", []) or [])[:declared_count]
+    if declared_count < 2 or declared_count > 8 or len(raw_players) != declared_count:
+        return None
+
+    players = []
+    for slot_number, raw_player in enumerate(raw_players, start=1):
+        player_type = _safe_get(raw_player, "type")
+        player_type_name = str(
+            getattr(player_type, "name", player_type) or ""
+        ).casefold()
+        ai_base_name = _safe_decode_text(_safe_get(raw_player, "ai_type"))
+        ai_name = _safe_decode_text(_safe_get(raw_player, "ai_name"))
+        name = _safe_decode_text(_safe_get(raw_player, "name"))
+        if not name and player_type_name == "computer":
+            ai_label = ai_name or ai_base_name or "Computer"
+            name = f"{ai_label} [AI {slot_number}]"
+        if not name:
+            return None
+
+        steam_id = _normalize_steam_id(_safe_get(raw_player, "steam_id"))
+        raw_player_number = _safe_int(_safe_get(raw_player, "player_number"))
+        civilization = _safe_int(_safe_get(raw_player, "civ_id"))
+        player = {
+            "name": name,
+            "number": slot_number,
+            "header_player_number": raw_player_number,
+            "player_number_source": "hd_metadata_slot_ordinal",
+            "player_number_conflict": raw_player_number != slot_number,
+            "civilization": civilization,
+            "civilization_name": _normalize_civilization_name(civilization),
+            "winner": None,
+            "score": None,
+            "user_id": steam_id,
+            "steam_id": steam_id,
+            "steam_rm_rating": _normalize_rating(
+                _safe_get(raw_player, "hd_dm_rating")
+            ),
+            "steam_dm_rating": _normalize_rating(
+                _safe_get(raw_player, "hd_rm_rating")
+            ),
+            "rate_snapshot": None,
+            "eapm": None,
+            "position": None,
+            "color_id": _safe_int(_safe_get(raw_player, "color_id")),
+            "team_id": _safe_int(_safe_get(raw_player, "team_index")),
+            "team_id_source": "hd_platform_metadata",
+            "human": (
+                True
+                if player_type_name == "human"
+                else False if player_type_name == "computer" else None
+            ),
+            "ai_base_name": ai_base_name,
+            "ai_name": ai_name,
+            "header_only": True,
+            "metadata_fragment": True,
+        }
+        players.append(player)
+
+    if len({player["name"].casefold() for player in players}) != len(players):
+        return None
+    return players
+
+
+def _hd_metadata_fragment_diplomacy(players):
+    grouped = {}
+    for player in players:
+        team_id = player.get("team_id")
+        if team_id is None:
+            return {
+                "source": "hd_platform_metadata",
+                "coherent": False,
+                "type": "Unknown",
+                "team_size": "unknown",
+                "teams": [],
+            }
+        grouped.setdefault(team_id, []).append(player)
+
+    team_sizes = sorted(len(team_players) for team_players in grouped.values())
+    if len(players) == 2 and team_sizes == [1, 1]:
+        diplomacy_type = "1v1"
+        team_size = "1v1"
+    elif len(grouped) == 2 and len(players) > 2:
+        diplomacy_type = "TG"
+        team_size = "v".join(str(size) for size in team_sizes)
+    elif len(grouped) == len(players):
+        diplomacy_type = "FFA"
+        team_size = "FFA"
+    else:
+        diplomacy_type = "Other"
+        team_size = "v".join(str(size) for size in team_sizes)
+    return {
+        "source": "hd_platform_metadata",
+        "coherent": True,
+        "type": diplomacy_type,
+        "team_size": team_size,
+        "teams": [
+            {
+                "team_id": team_id,
+                "player_numbers": [player["number"] for player in team_players],
+                "players": [player["name"] for player in team_players],
+            }
+            for team_id, team_players in sorted(grouped.items(), key=lambda item: item[0])
+        ],
+    }
+
+
+def _parse_hd_metadata_fragment_body_bytes(
+    replay_path,
+    file_bytes,
+    parse_error,
+    *,
+    capture_engine_evidence=False,
+    apply_hd_early_exit_rules=True,
+):
+    if "-> lobby" in str(parse_error).casefold():
+        return None
+    try:
+        decompressed = decompress_mgz_header(io.BytesIO(file_bytes)).getvalue()
+        parsed_header = _HD_METADATA_PREFIX.parse(decompressed)
+    except Exception as fragment_error:
+        logging.error("❌ HD metadata fragment fallback failed: %s", fragment_error)
+        return None
+    if _safe_get(parsed_header, "version") is not Version.HD:
+        return None
+
+    players = _extract_hd_metadata_fragment_players(parsed_header)
+    if not players:
+        logging.error("❌ HD metadata fragment roster validation failed")
+        return None
+    diplomacy = _hd_metadata_fragment_diplomacy(players)
+    hd = _safe_get(parsed_header, "hd")
+    custom_map = _safe_decode_text(_safe_get(hd, "custom_random_map_file"))
+    map_payload = _header_map_payload(parsed_header)
+    if custom_map:
+        map_payload["name"] = custom_map.removesuffix(".rms")
+        map_payload["custom"] = True
+        map_payload["custom_filename"] = custom_map
+    map_snapshot = {
+        key: value
+        for key, value in map_payload.items()
+        if key in {"id", "name", "size", "dimension", "custom"}
+    }
+    unavailable_objects = {
+        "snapshot_scope": "unavailable_in_hd_metadata_fragment",
+        "object_count": None,
+        "objects": [],
+    }
+    header_length = struct.unpack_from("<I", file_bytes, 0)[0]
+    body_failure = None
+    try:
+        evidence = capture_fragment_body_evidence(
+            file_bytes,
+            header_length=header_length,
+            restore_time_ms=0,
+            players=players,
+            map_snapshot=map_snapshot,
+            diplomacy=diplomacy,
+            initial_objects=unavailable_objects,
+        )
+        evidence["dataset"] = {
+            "source": "hd_platform_metadata_plus_direct_body",
+            "validated_gameplay_truth": False,
+        }
+    except Exception as body_error:
+        body_failure = normalize_failure_signature(body_error, stage="body_fragment")
+        evidence = {
+            "dataset": {
+                "source": "hd_platform_metadata_only",
+                "validated_gameplay_truth": False,
+            },
+            "diplomacy": diplomacy,
+            "map_snapshot": map_snapshot,
+            "initial_objects": unavailable_objects,
+            "actions": {"available": False, "count": None, "stream": []},
+            "chat": {"available": False, "count": None, "stream": []},
+        }
+
+    actions = evidence.get("actions") if isinstance(evidence.get("actions"), dict) else {}
+    resignation_timeline = actions.get("resignation_timeline") or []
+    resigned_player_numbers = sorted(
+        {
+            number
+            for event in resignation_timeline
+            if isinstance(event, dict)
+            and (number := _safe_int(event.get("player_number"))) is not None
+        }
+    )
+    names_by_number = {player["number"]: player["name"] for player in players}
+    resigned_player_names = [
+        names_by_number[number]
+        for number in resigned_player_numbers
+        if number in names_by_number
+    ]
+    duration_ms = _safe_int(actions.get("duration_ms"))
+    duration_seconds = _normalize_mgz_duration_seconds(duration_ms) or 0
+    body_available = actions.get("available") is True
+    game_type_id = _safe_int(_safe_get(hd, "game_type"))
+    game_type = (
+        MGZ_HD_TYPE9_GAME_TYPE_LABEL
+        if game_type_id == 9
+        else f"HD game type {game_type_id}" if game_type_id is not None else "Unknown"
+    )
+    original_failure = normalize_failure_signature(parse_error, stage="header")
+    player_number_conflicts = sum(
+        bool(player.get("player_number_conflict")) for player in players
+    )
+    key_events = {
+        "completed": bool(resigned_player_numbers),
+        "header_metadata_fragment_recovery": True,
+        "header_fragment_boundary": "after_hd_platform_metadata",
+        "header_failure_signature": original_failure["signature"],
+        "body_stream_recovery": body_available,
+        "body_stream_complete": actions.get("body_stream_complete") if body_available else False,
+        "body_byte_size": actions.get("body_byte_size") if body_available else max(0, len(file_bytes) - header_length),
+        "body_operation_count": actions.get("operation_count") if body_available else None,
+        "postgame_available": False,
+        "postgame_packet_present": bool((actions.get("type_counts") or {}).get("postgame")),
+        "has_scores": False,
+        "has_achievements": False,
+        "player_score_count": 0,
+        "achievement_player_count": 0,
+        "achievement_shell_count": 0,
+        "has_achievement_shell": False,
+        "platform_id": "hd" if _safe_get(hd, "multiplayer") else None,
+        "platform_match_id": _header_platform_match_id(parsed_header),
+        "rated": bool(_safe_get(hd, "is_ranked")) if hd else None,
+        "restored": None,
+        "duration_source": "mgz.fast.body.sync_accumulation" if body_available else None,
+        "resigned_player_numbers": resigned_player_numbers,
+        "resigned_player_names": resigned_player_names,
+        "team_source": diplomacy["source"],
+        "diplomacy": diplomacy,
+        "player_number_source": "hd_metadata_slot_ordinal",
+        "header_player_number_conflict_count": player_number_conflicts,
+        "settings": {
+            "type": game_type,
+            "type_id": game_type_id,
+            "difficulty": str(_safe_get(hd, "difficulty") or "Unknown"),
+            "population_limit": _safe_int(_safe_get(hd, "population_limit")),
+            "speed": _safe_get(hd, "speed"),
+            "lock_teams": bool(_safe_get(hd, "lock_teams")),
+            "treaty_length": _safe_int(_safe_get(hd, "treaty_length")),
+        },
+    }
+    if body_failure:
+        key_events["body_failure_signature"] = body_failure["signature"]
+
+    stats = {
+        "game_version": str(_safe_get(parsed_header, "version", "Unknown")),
+        "map": map_payload,
+        "game_type": game_type,
+        "duration": duration_seconds,
+        "game_duration": duration_seconds,
+        "players": players,
+        "winner": "Unknown",
+        "event_types": sorted((actions.get("type_counts") or {}).keys()),
+        "key_events": key_events,
+        "completed": bool(resigned_player_numbers),
+        "disconnect_detected": body_available and not bool(resigned_player_numbers),
+        "parse_reason": (
+            "hd_metadata_fragment_body_recovery"
+            if body_available
+            else "hd_metadata_fragment_only_recovery"
+        ),
+    }
+    dt = extract_datetime_from_filename(replay_path)
+    stats["played_on"] = dt.isoformat() if dt else None
+    stats = _apply_completion_metadata(stats)
+    stats = _maybe_apply_hd_early_exit_rules(stats, apply_hd_early_exit_rules)
+    if capture_engine_evidence:
+        stats["_engine_evidence"] = evidence
+        if body_failure:
+            stats["_engine_evidence_failure"] = body_failure
+    logging.warning(
+        "⚠️ HD metadata fragment/body fallback used for %s after header parse failed",
+        replay_path,
+    )
+    return stats
+
+
 def _parse_header_only_bytes(replay_path, file_bytes, parse_error):
     try:
         parsed_header = header.parse(file_bytes)
@@ -1592,6 +1880,19 @@ def _parse_sync_bytes_with_diagnostics(
                 fragment_fallback,
                 diagnostic,
                 "mgz_hd_fragment_header_body_fallback",
+            )
+        metadata_fragment_fallback = _parse_hd_metadata_fragment_body_bytes(
+            replay_path,
+            file_bytes,
+            e,
+            capture_engine_evidence=capture_engine_evidence,
+            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+        )
+        if metadata_fragment_fallback:
+            return (
+                metadata_fragment_fallback,
+                diagnostic,
+                "mgz_hd_metadata_fragment_body_fallback",
             )
         header_fallback = _parse_header_only_bytes(replay_path, file_bytes, e)
         if header_fallback:
