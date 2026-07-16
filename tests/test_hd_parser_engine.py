@@ -40,6 +40,9 @@ METADATA_FRAGMENT_MANIFEST_PATH = (
     / "fixtures"
     / "hd_metadata_fragment_golden_manifest.json"
 )
+TRAILING_HEADER_MANIFEST_PATH = (
+    Path(__file__).parent / "fixtures" / "hd_trailing_header_golden_manifest.json"
+)
 DEFAULT_GOLDEN_DIR = (
     Path.home()
     / "Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)"
@@ -76,6 +79,12 @@ def _fragment_manifest():
 def _metadata_fragment_manifest():
     return json.loads(
         METADATA_FRAGMENT_MANIFEST_PATH.read_text(encoding="utf-8")
+    )["fixtures"]
+
+
+def _trailing_header_manifest():
+    return json.loads(
+        TRAILING_HEADER_MANIFEST_PATH.read_text(encoding="utf-8")
     )["fixtures"]
 
 
@@ -162,13 +171,39 @@ def metadata_fragment_golden_candidates():
     return manifest, candidates
 
 
+@pytest.fixture(scope="module")
+def trailing_header_golden_candidates():
+    manifest = _trailing_header_manifest()
+    missing = [
+        entry["filename"]
+        for entry in manifest
+        if not _fragment_golden_path(entry).is_file()
+    ]
+    if missing:
+        pytest.skip(
+            "HD trailing-header goldens are private immutable replay bytes; "
+            "set AOE2_HD_FRAGMENT_GOLDEN_DIR to run them"
+        )
+
+    candidates = {}
+    for expected in manifest:
+        path = _fragment_golden_path(expected)
+        file_bytes = path.read_bytes()
+        assert hashlib.sha256(file_bytes).hexdigest() == expected["sha256"]
+        candidates[expected["filename"]] = parse_replay_candidate_bytes(
+            expected["filename"],
+            file_bytes,
+        )
+    return manifest, candidates
+
+
 def test_parser_pass_identity_is_explicit_and_idempotent():
     identity = parser_identity(apply_hd_early_exit_rules=True)
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.2"
-    assert identity["pass_version"] == PARSER_PASS_VERSION == "4"
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.3"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "5"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 
@@ -406,6 +441,73 @@ def test_hd_metadata_fragment_goldens_recover_ai_slots_without_hiding_conflicts(
         ]
         assert len(actions["resignation_timeline"]) == expected[
             "semantic_resignation_count"
+        ]
+        assert candidate["candidate"]["changes_effective_truth"] is False
+
+
+def test_hd_trailing_header_golden_recovers_exact_orphan_chat_and_body(
+    trailing_header_golden_candidates,
+):
+    manifest, candidates = trailing_header_golden_candidates
+    for expected in manifest:
+        candidate = candidates[expected["filename"]]
+        projection = candidate["projection"]
+        key_events = projection["key_events"]
+        actions = candidate["actions"]
+        evidence = candidate["evidence"]
+        resolution = projection["team_resolution"]
+
+        assert candidate["artifact"]["sha256"] == expected["sha256"]
+        assert candidate["artifact"]["byte_size"] == expected["byte_size"]
+        assert candidate["run"]["status"] == "recovered"
+        assert candidate["run"]["parse_mode"] == (
+            "mgz_hd_trailing_header_body_fallback"
+        )
+        assert key_events["header_framing_anomaly"] == (
+            "extra_length_prefixed_lobby_chat_after_declared_count"
+        )
+        assert key_events["trailing_header_byte_size"] == expected[
+            "trailing_header_byte_size"
+        ]
+        assert key_events["trailing_header_sha256"] == expected[
+            "trailing_header_sha256"
+        ]
+        assert key_events["recovered_trailing_lobby_chat_count"] == expected[
+            "recovered_trailing_lobby_chat_count"
+        ]
+        assert [player["name"] for player in projection["players"]] == expected[
+            "players"
+        ]
+        assert projection["duration"] == expected["duration_seconds"]
+        assert projection["map"]["id"] == expected["map_id"]
+        assert projection["map"]["name"] == expected["map_name"]
+        assert projection["map"]["dimension"] == expected["map_dimension"]
+        assert resolution["format"] == expected["format"]
+        assert resolution["result_trusted"] is expected["result_trusted"]
+        assert resolution["winning_player_names"] == expected["trusted_winners"]
+        assert key_events["body_stream_complete"] is True
+        assert key_events["body_operation_count"] == expected[
+            "body_operation_count"
+        ]
+        assert actions["count"] == expected["raw_action_count"]
+        assert actions["unique_action_identity_count"] == expected[
+            "unique_action_identity_count"
+        ]
+        assert actions["exact_duplicate_packet_excess"] == expected[
+            "exact_duplicate_packet_excess"
+        ]
+        assert len(actions["raw_resignation_timeline"]) == expected[
+            "raw_resignation_packet_count"
+        ]
+        assert len(actions["resignation_timeline"]) == expected[
+            "semantic_resignation_count"
+        ]
+        assert evidence["chat"]["count"] == expected["chat_message_count"]
+        assert evidence["chat"]["stream"][0]["type"] == (
+            "trailing_length_prefixed_lobby_chat"
+        )
+        assert evidence["initial_objects"]["object_count"] == expected[
+            "initial_object_count"
         ]
         assert candidate["candidate"]["changes_effective_truth"] is False
 

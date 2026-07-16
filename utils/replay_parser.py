@@ -37,6 +37,11 @@ _HD_METADATA_PREFIX = Struct(
     "metadata_fragment_offset" / Tell,
     "metadata_fragment_tail" / GreedyBytes,
 )
+_HD_TRAILING_HEADER_PREFIX = Struct(
+    *compressed_header.subcons[:-1],
+    "trailing_header_offset" / Tell,
+    "trailing_header_bytes" / GreedyBytes,
+)
 
 
 def _patch_mgz_hd_type9_game_type():
@@ -1183,6 +1188,234 @@ def _parse_hd_fragment_header_body_bytes(
     return stats
 
 
+def _decode_trailing_header_chat_records(trailing_bytes):
+    records = []
+    offset = 0
+    while offset < len(trailing_bytes):
+        if offset + 4 > len(trailing_bytes):
+            return None
+        message_length = struct.unpack_from("<I", trailing_bytes, offset)[0]
+        offset += 4
+        if message_length <= 0 or offset + message_length > len(trailing_bytes):
+            return None
+        raw_message = trailing_bytes[offset:offset + message_length]
+        offset += message_length
+        message = _safe_decode_text(raw_message.rstrip(b"\x00"))
+        if not message:
+            return None
+        records.append(
+            {
+                "ordinal": len(records) + 1,
+                "timestamp_ms": 0,
+                "origination": "lobby",
+                "type": "trailing_length_prefixed_lobby_chat",
+                "player_number": None,
+                "message": message,
+                "audience": None,
+                "provenance_class": "direct_header",
+                "raw_byte_size": message_length,
+            }
+        )
+    return records
+
+
+def _parse_hd_trailing_header_body_bytes(
+    replay_path,
+    file_bytes,
+    parse_error,
+    *,
+    capture_engine_evidence=False,
+    apply_hd_early_exit_rules=True,
+):
+    if "expected end of stream" not in str(parse_error).casefold():
+        return None
+    try:
+        decompressed = decompress_mgz_header(io.BytesIO(file_bytes)).getvalue()
+        parsed_header = _HD_TRAILING_HEADER_PREFIX.parse(decompressed)
+    except Exception as fragment_error:
+        logging.error("❌ HD trailing-header fallback failed: %s", fragment_error)
+        return None
+    if _safe_get(parsed_header, "version") is not Version.HD:
+        return None
+
+    trailing_bytes = bytes(
+        _safe_get(parsed_header, "trailing_header_bytes", b"") or b""
+    )
+    if not trailing_bytes or len(trailing_bytes) > 1024 * 1024:
+        return None
+    trailing_chat = _decode_trailing_header_chat_records(trailing_bytes)
+    if not trailing_chat:
+        logging.error("❌ HD trailing-header bytes were not exact lobby chat records")
+        return None
+
+    players = _extract_header_player_rows(parsed_header)
+    lobby = _safe_get(parsed_header, "lobby")
+    raw_teams = list(_safe_get(lobby, "teams", []) or [])
+    if len(players) < 2 or len(raw_teams) < len(players):
+        return None
+    for player in players:
+        number = _safe_int(player.get("number"))
+        raw_team = raw_teams[number - 1] if number and number <= len(raw_teams) else None
+        player["team_id"] = raw_team - 2 if isinstance(raw_team, int) else None
+        player["team_id_source"] = "hd_lobby_team_array"
+    diplomacy = _hd_metadata_fragment_diplomacy(players)
+
+    map_payload = _header_map_payload(parsed_header)
+    hd = _safe_get(parsed_header, "hd")
+    custom_map = _safe_decode_text(_safe_get(hd, "custom_random_map_file"))
+    if custom_map:
+        map_payload["name"] = custom_map.removesuffix(".rms")
+        map_payload["custom"] = True
+        map_payload["custom_filename"] = custom_map
+    map_snapshot = {
+        key: value
+        for key, value in map_payload.items()
+        if key in {"id", "name", "size", "dimension", "custom"}
+    }
+    initial = _safe_get(parsed_header, "initial")
+    restore_time_ms = _safe_int(_safe_get(initial, "restore_time")) or 0
+    header_length = struct.unpack_from("<I", file_bytes, 0)[0]
+    body_failure = None
+    try:
+        evidence = capture_fragment_body_evidence(
+            file_bytes,
+            header_length=header_length,
+            restore_time_ms=restore_time_ms,
+            players=players,
+            map_snapshot=map_snapshot,
+            diplomacy=diplomacy,
+            initial_objects=_fragment_initial_object_summary(parsed_header),
+        )
+        evidence["dataset"] = {
+            "source": "complete_hd_header_plus_trailing_lobby_chat_plus_direct_body",
+            "validated_gameplay_truth": False,
+        }
+        body_chat = list((evidence.get("chat") or {}).get("stream") or [])
+        combined_chat = trailing_chat + body_chat
+        for ordinal, entry in enumerate(combined_chat, start=1):
+            entry["ordinal"] = ordinal
+        evidence["chat"] = {
+            "available": True,
+            "count": len(combined_chat),
+            "stream": combined_chat,
+        }
+    except Exception as body_error:
+        body_failure = normalize_failure_signature(body_error, stage="body_fragment")
+        evidence = {
+            "dataset": {
+                "source": "complete_hd_header_plus_trailing_lobby_chat",
+                "validated_gameplay_truth": False,
+            },
+            "diplomacy": diplomacy,
+            "map_snapshot": map_snapshot,
+            "initial_objects": _fragment_initial_object_summary(parsed_header),
+            "actions": {"available": False, "count": None, "stream": []},
+            "chat": {
+                "available": True,
+                "count": len(trailing_chat),
+                "stream": trailing_chat,
+            },
+        }
+
+    actions = evidence.get("actions") if isinstance(evidence.get("actions"), dict) else {}
+    resignation_timeline = actions.get("resignation_timeline") or []
+    resigned_player_numbers = sorted(
+        {
+            number
+            for event in resignation_timeline
+            if isinstance(event, dict)
+            and (number := _safe_int(event.get("player_number"))) is not None
+        }
+    )
+    names_by_number = {
+        _safe_int(player.get("number")): player.get("name") for player in players
+    }
+    resigned_player_names = [
+        names_by_number[number]
+        for number in resigned_player_numbers
+        if names_by_number.get(number)
+    ]
+    duration_ms = _safe_int(actions.get("duration_ms"))
+    duration_seconds = _normalize_mgz_duration_seconds(duration_ms) or 0
+    body_available = actions.get("available") is True
+    game_type = str(_safe_get(lobby, "game_type", "Unknown"))
+    original_failure = normalize_failure_signature(parse_error, stage="header")
+    key_events = {
+        "completed": bool(resigned_player_numbers),
+        "header_trailing_bytes_recovery": True,
+        "header_fragment_boundary": "after_complete_lobby_before_termination",
+        "header_framing_anomaly": (
+            "extra_length_prefixed_lobby_chat_after_declared_count"
+        ),
+        "header_failure_signature": original_failure["signature"],
+        "trailing_header_byte_size": len(trailing_bytes),
+        "trailing_header_sha256": hashlib.sha256(trailing_bytes).hexdigest(),
+        "recovered_trailing_lobby_chat_count": len(trailing_chat),
+        "body_stream_recovery": body_available,
+        "body_stream_complete": actions.get("body_stream_complete") if body_available else False,
+        "body_byte_size": actions.get("body_byte_size") if body_available else max(0, len(file_bytes) - header_length),
+        "body_operation_count": actions.get("operation_count") if body_available else None,
+        "postgame_available": False,
+        "postgame_packet_present": bool((actions.get("type_counts") or {}).get("postgame")),
+        "has_scores": False,
+        "has_achievements": False,
+        "player_score_count": 0,
+        "achievement_player_count": 0,
+        "achievement_shell_count": 0,
+        "has_achievement_shell": False,
+        "platform_id": "hd" if _safe_get(hd, "multiplayer") else None,
+        "platform_match_id": _header_platform_match_id(parsed_header),
+        "rated": bool(_safe_get(hd, "is_ranked")) if hd else None,
+        "restored": restore_time_ms > 0,
+        "restore_time_ms": restore_time_ms,
+        "duration_source": "mgz.fast.body.sync_accumulation" if body_available else None,
+        "resigned_player_numbers": resigned_player_numbers,
+        "resigned_player_names": resigned_player_names,
+        "team_source": "hd_lobby_team_array",
+        "diplomacy": diplomacy,
+        "settings": {
+            "type": game_type,
+            "population_limit": _safe_int(_safe_get(lobby, "population_limit")),
+            "lock_teams": bool(_safe_get(lobby, "lock_teams")),
+            "treaty_length": _safe_int(_safe_get(_safe_get(lobby, "de"), "treaty_length")),
+        },
+    }
+    if body_failure:
+        key_events["body_failure_signature"] = body_failure["signature"]
+
+    stats = {
+        "game_version": str(_safe_get(parsed_header, "version", "Unknown")),
+        "map": map_payload,
+        "game_type": game_type,
+        "duration": duration_seconds,
+        "game_duration": duration_seconds,
+        "players": players,
+        "winner": "Unknown",
+        "event_types": sorted((actions.get("type_counts") or {}).keys()),
+        "key_events": key_events,
+        "completed": bool(resigned_player_numbers),
+        "disconnect_detected": body_available and not bool(resigned_player_numbers),
+        "parse_reason": (
+            "hd_trailing_header_body_recovery"
+            if body_available
+            else "hd_trailing_header_only_recovery"
+        ),
+    }
+    dt = extract_datetime_from_filename(replay_path)
+    stats["played_on"] = dt.isoformat() if dt else None
+    stats = _apply_completion_metadata(stats)
+    stats = _maybe_apply_hd_early_exit_rules(stats, apply_hd_early_exit_rules)
+    if capture_engine_evidence:
+        stats["_engine_evidence"] = evidence
+        if body_failure:
+            stats["_engine_evidence_failure"] = body_failure
+    logging.warning(
+        "⚠️ HD trailing-header/body fallback used for %s after termination check failed",
+        replay_path,
+    )
+    return stats
+
+
 def _extract_hd_metadata_fragment_players(parsed_header):
     hd = _safe_get(parsed_header, "hd")
     declared_count = _safe_int(_safe_get(hd, "num_players")) or 0
@@ -1868,6 +2101,19 @@ def _parse_sync_bytes_with_diagnostics(
                 live_fallback["parse_reason"] = "hd_final_parse_match_fallback"
                 live_fallback.setdefault("key_events", {})["parse_match_final_fallback"] = True
             return live_fallback, diagnostic, "mgz_parse_match_fallback"
+        trailing_header_fallback = _parse_hd_trailing_header_body_bytes(
+            replay_path,
+            file_bytes,
+            e,
+            capture_engine_evidence=capture_engine_evidence,
+            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+        )
+        if trailing_header_fallback:
+            return (
+                trailing_header_fallback,
+                diagnostic,
+                "mgz_hd_trailing_header_body_fallback",
+            )
         fragment_fallback = _parse_hd_fragment_header_body_bytes(
             replay_path,
             file_bytes,

@@ -1,0 +1,44 @@
+{
+  "corpus": "AoE2WAR private HD trailing-header golden",
+  "parser_minimum": "mgz==1.8.51",
+  "fixtures": [
+    {
+      "filename": "44c1ff85d116758ddacf5cc0b80699a71428fe3aeadeb61b42c3b6d50072f220.aoe2record",
+      "sha256": "44c1ff85d116758ddacf5cc0b80699a71428fe3aeadeb61b42c3b6d50072f220",
+      "byte_size": 3354048,
+      "players": [
+        "JPKBARTENDER",
+        "copper_head_road",
+        "Jim",
+        "CRAZY_ALLOWED",
+        "Scavanger_Ab",
+        "Sameer 7™",
+        "Emerald",
+        "The illuminati"
+      ],
+      "duration_seconds": 8056,
+      "map_id": 59,
+      "map_name": "Forest Nothing Feitoria",
+      "map_dimension": 240,
+      "format": "4v4",
+      "trusted_winners": [
+        "JPKBARTENDER",
+        "Scavanger_Ab",
+        "Jim",
+        "copper_head_road"
+      ],
+      "result_trusted": true,
+      "raw_action_count": 31742,
+      "unique_action_identity_count": 24057,
+      "exact_duplicate_packet_excess": 7685,
+      "raw_resignation_packet_count": 15,
+      "semantic_resignation_count": 4,
+      "body_operation_count": 151664,
+      "trailing_header_byte_size": 80,
+      "trailing_header_sha256": "e91f4f4b1c3d534a08433182619c48c5b563d08ca88b2a5816d844cf145d9a05",
+      "recovered_trailing_lobby_chat_count": 1,
+      "chat_message_count": 59,
+      "initial_object_count": 144
+    }
+  ]
+}
