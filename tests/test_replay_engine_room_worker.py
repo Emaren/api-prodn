@@ -35,6 +35,7 @@ from utils.replay_engine_room_worker import (
     stable_hash,
     store_candidate_object,
     submission_receipt_identity,
+    validate_external_parser_python,
     validate_jobs_root,
     verify_candidate_object,
 )
@@ -145,6 +146,13 @@ def test_external_parser_identity_is_part_of_job_identity(tmp_path: Path) -> Non
         parser_identity_override=changed_identity,
     )
     assert changed_spec.job_identity_hash != default_spec.job_identity_hash
+
+
+def test_external_parser_keeps_explicit_venv_symlink_path(tmp_path: Path) -> None:
+    interpreter = tmp_path / "compat-venv-python"
+    interpreter.symlink_to(sys.executable)
+
+    assert validate_external_parser_python(interpreter) == interpreter.absolute()
 
 
 def test_external_candidate_parser_returns_structured_failed_candidate(

@@ -609,7 +609,10 @@ def _external_parser_environment() -> dict[str, str]:
 
 
 def validate_external_parser_python(value: Path) -> Path:
-    interpreter = value.expanduser().resolve()
+    # Keep the explicitly supplied venv executable path. Resolving its final
+    # symlink to /usr/bin/python would discard pyvenv.cfg discovery and silently
+    # switch parser dependencies/identity.
+    interpreter = Path(os.path.abspath(value.expanduser()))
     if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
         raise ValueError("external parser Python must be an executable file")
     if not LOCAL_CANDIDATE_CLI.is_file():
