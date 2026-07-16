@@ -6,10 +6,11 @@ import logging
 import hashlib
 import math
 import struct
+import zlib
 import aiofiles
 import asyncio
 import uuid
-from construct import GreedyBytes, Struct, Tell
+from construct import GreedyBytes, Int32ul, Struct, Tell
 from mgz import compressed_header, const, header, summary
 from mgz.fast.header import decompress as decompress_mgz_header
 from mgz.model import parse_match
@@ -42,6 +43,27 @@ _HD_TRAILING_HEADER_PREFIX = Struct(
     "trailing_header_offset" / Tell,
     "trailing_header_bytes" / GreedyBytes,
 )
+_HD_SAVED_GAME_SNAPSHOT = Struct(
+    *compressed_header.subcons[:11],
+    "save_snapshot_word" / Int32ul,
+    *compressed_header.subcons[11:-1],
+    "saved_game_offset" / Tell,
+    "saved_game_tail" / GreedyBytes,
+)
+_HD_SAVED_GAME_INITIAL_PREFIX = Struct(
+    *compressed_header.subcons[:11],
+    "save_snapshot_word" / Int32ul,
+    *compressed_header.subcons[11:12],
+    "saved_game_offset" / Tell,
+    "saved_game_tail" / GreedyBytes,
+)
+_HD_SAVED_GAME_MAP_PREFIX = Struct(
+    *compressed_header.subcons[:11],
+    "save_snapshot_word" / Int32ul,
+    "saved_game_offset" / Tell,
+    "saved_game_tail" / GreedyBytes,
+)
+_HD_SAVED_GAME_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
 
 
 def _patch_mgz_hd_type9_game_type():
@@ -1525,6 +1547,309 @@ def _hd_metadata_fragment_diplomacy(players):
     }
 
 
+def _decompress_hd_saved_game_snapshot(file_bytes):
+    """Inflate one exact HD saved-game container with a hard output bound."""
+    inflater = zlib.decompressobj(wbits=-15)
+    decompressed = inflater.decompress(
+        file_bytes,
+        _HD_SAVED_GAME_MAX_DECOMPRESSED_BYTES + 1,
+    )
+    if (
+        len(decompressed) > _HD_SAVED_GAME_MAX_DECOMPRESSED_BYTES
+        or inflater.unconsumed_tail
+    ):
+        raise ValueError("HD saved-game snapshot exceeds decompression limit")
+    decompressed += inflater.flush()
+    if len(decompressed) > _HD_SAVED_GAME_MAX_DECOMPRESSED_BYTES:
+        raise ValueError("HD saved-game snapshot exceeds decompression limit")
+    if not inflater.eof or inflater.unused_data:
+        raise ValueError(
+            "HD saved-game container is not one exact raw-deflate stream: "
+            f"eof={inflater.eof} unused={len(inflater.unused_data)}"
+        )
+    return decompressed
+
+
+def _saved_game_metadata_type(parsed_header):
+    hd = _safe_get(parsed_header, "hd")
+    game_type_id = _safe_int(_safe_get(hd, "game_type"))
+    if game_type_id == 9:
+        return MGZ_HD_TYPE9_GAME_TYPE_LABEL, game_type_id
+    return (
+        f"HD game type {game_type_id}" if game_type_id is not None else "Unknown",
+        game_type_id,
+    )
+
+
+def _parse_hd_saved_game_snapshot_bytes(
+    replay_path,
+    file_bytes,
+    *,
+    capture_engine_evidence=False,
+):
+    """Decode `.aoe2mpgame` only into a private, non-final candidate snapshot."""
+    try:
+        decompressed = _decompress_hd_saved_game_snapshot(file_bytes)
+    except Exception as container_error:
+        return (
+            None,
+            normalize_failure_signature(container_error, stage="saved_game_container"),
+            "mgz_hd_saved_game_container_failed",
+        )
+
+    structure_failure = None
+    structure_scope = "complete_saved_game_snapshot"
+    try:
+        parsed_header = _HD_SAVED_GAME_SNAPSHOT.parse(decompressed)
+        if bytes(_safe_get(parsed_header, "saved_game_tail", b"") or b""):
+            raise ValueError("complete saved-game snapshot parser left trailing bytes")
+        parse_mode = "mgz_hd_saved_game_snapshot"
+    except Exception as full_error:
+        structure_failure = normalize_failure_signature(
+            full_error,
+            stage="saved_game_snapshot_structure",
+        )
+        try:
+            parsed_header = _HD_SAVED_GAME_INITIAL_PREFIX.parse(decompressed)
+            structure_scope = "initial_state_prefix"
+            parse_mode = "mgz_hd_saved_game_initial_prefix"
+        except Exception:
+            try:
+                parsed_header = _HD_SAVED_GAME_MAP_PREFIX.parse(decompressed)
+                structure_scope = "map_and_platform_prefix"
+                parse_mode = "mgz_hd_saved_game_map_prefix"
+            except Exception as prefix_error:
+                return (
+                    None,
+                    normalize_failure_signature(
+                        prefix_error,
+                        stage="saved_game_snapshot_prefix",
+                    ),
+                    "mgz_hd_saved_game_snapshot_failed",
+                )
+
+    if _safe_get(parsed_header, "version") is not Version.HD:
+        return (
+            None,
+            normalize_failure_signature(
+                ValueError("saved-game snapshot is not AoE2 HD"),
+                stage="saved_game_snapshot_identity",
+            ),
+            "mgz_hd_saved_game_snapshot_failed",
+        )
+
+    initial_available = structure_scope != "map_and_platform_prefix"
+    if initial_available:
+        players = _extract_header_player_rows(parsed_header)
+    else:
+        players = _extract_hd_metadata_fragment_players(parsed_header) or []
+        # HD platform team indexes are not sufficient truth for this damaged
+        # snapshot variant. Preserve roster identity without inventing teams.
+        for player in players:
+            player["team_id"] = None
+            player["team_id_source"] = "unavailable_without_initial_diplomacy"
+
+    player_keys = {
+        str(player.get("name") or "").strip().casefold()
+        for player in players
+        if isinstance(player, dict)
+    }
+    if (
+        not players
+        or len(players) > 8
+        or len(player_keys) != len(players)
+        or "" in player_keys
+    ):
+        return (
+            None,
+            normalize_failure_signature(
+                ValueError("saved-game snapshot roster is not unique and complete"),
+                stage="saved_game_snapshot_roster",
+            ),
+            "mgz_hd_saved_game_snapshot_failed",
+        )
+
+    if initial_available:
+        diplomacy = _fragment_diplomacy_groups(parsed_header, players)
+        if not diplomacy:
+            return (
+                None,
+                normalize_failure_signature(
+                    ValueError("saved-game snapshot diplomacy is not coherent"),
+                    stage="saved_game_snapshot_diplomacy",
+                ),
+                "mgz_hd_saved_game_snapshot_failed",
+            )
+    else:
+        diplomacy = {
+            "source": "unavailable_without_initial_diplomacy",
+            "coherent": False,
+            "type": "Unknown",
+            "team_size": "unknown",
+            "teams": [],
+        }
+
+    map_payload = _header_map_payload(parsed_header)
+    hd = _safe_get(parsed_header, "hd")
+    custom_map = _safe_decode_text(_safe_get(hd, "custom_random_map_file"))
+    if custom_map:
+        map_payload["name"] = custom_map.removesuffix(".rms")
+        map_payload["custom"] = True
+        map_payload["custom_filename"] = custom_map
+    map_snapshot = {
+        key: value
+        for key, value in map_payload.items()
+        if key in {"id", "name", "size", "dimension", "custom"}
+    }
+
+    initial = _safe_get(parsed_header, "initial")
+    restore_time_ms = (
+        _safe_int(_safe_get(initial, "restore_time")) if initial_available else None
+    )
+    lobby = _safe_get(parsed_header, "lobby")
+    if structure_scope == "complete_saved_game_snapshot" and lobby is not None:
+        game_type = str(_safe_get(lobby, "game_type", "Unknown"))
+        game_type_id = _safe_int(_safe_get(lobby, "game_type_id"))
+    else:
+        game_type, game_type_id = _saved_game_metadata_type(parsed_header)
+
+    undecoded_tail = bytes(
+        _safe_get(parsed_header, "saved_game_tail", b"") or b""
+    )
+    structure_complete = structure_scope == "complete_saved_game_snapshot"
+    key_events = {
+        "completed": False,
+        "saved_game_snapshot": True,
+        "artifact_role": "saved_game_snapshot",
+        "final_battle_eligible": False,
+        "settlement_evidence_eligible": False,
+        "result_trusted": False,
+        "saved_game_structure_scope": structure_scope,
+        "saved_game_structure_complete": structure_complete,
+        "saved_game_raw_deflate_complete": True,
+        "saved_game_decompressed_byte_size": len(decompressed),
+        "saved_game_decompressed_sha256": hashlib.sha256(decompressed).hexdigest(),
+        "saved_game_snapshot_word": _safe_int(
+            _safe_get(parsed_header, "save_snapshot_word")
+        ),
+        "saved_game_decoded_prefix_byte_size": _safe_int(
+            _safe_get(parsed_header, "saved_game_offset")
+        ),
+        "saved_game_undecoded_tail_byte_size": len(undecoded_tail),
+        "saved_game_undecoded_tail_sha256": (
+            hashlib.sha256(undecoded_tail).hexdigest() if undecoded_tail else None
+        ),
+        "replay_body_available": False,
+        "postgame_available": False,
+        "postgame_packet_present": False,
+        "has_scores": False,
+        "has_achievements": False,
+        "player_score_count": 0,
+        "achievement_player_count": 0,
+        "achievement_shell_count": 0,
+        "has_achievement_shell": False,
+        "platform_id": "hd" if _safe_get(hd, "multiplayer") else None,
+        "platform_match_id": _header_platform_match_id(parsed_header),
+        "rated": bool(_safe_get(hd, "is_ranked")) if hd else None,
+        "restored": restore_time_ms is not None and restore_time_ms > 0,
+        "restore_time_ms": restore_time_ms,
+        "snapshot_elapsed_seconds": (
+            _normalize_mgz_duration_seconds(restore_time_ms)
+            if restore_time_ms is not None
+            else None
+        ),
+        "duration_source": None,
+        "resigned_player_numbers": [],
+        "resigned_player_names": [],
+        "team_source": diplomacy["source"],
+        "diplomacy": diplomacy,
+        "settings": {
+            "type": game_type,
+            "type_id": game_type_id,
+            "difficulty": str(_safe_get(hd, "difficulty") or "Unknown"),
+            "population_limit": (
+                _safe_int(_safe_get(lobby, "population_limit"))
+                if lobby is not None
+                else _safe_int(_safe_get(hd, "population_limit"))
+            ),
+            "lock_teams": (
+                bool(_safe_get(lobby, "lock_teams"))
+                if lobby is not None
+                else bool(_safe_get(hd, "lock_teams"))
+            ),
+        },
+    }
+    if structure_failure:
+        key_events["saved_game_structure_failure_signature"] = structure_failure[
+            "signature"
+        ]
+
+    stats = {
+        "game_version": str(_safe_get(parsed_header, "version", "Unknown")),
+        "map": map_payload,
+        "game_type": game_type,
+        # A saved snapshot's elapsed clock is not a completed replay duration.
+        "duration": 0,
+        "game_duration": 0,
+        "players": players,
+        "winner": "Unknown",
+        "event_types": [],
+        "key_events": key_events,
+        "completed": False,
+        "disconnect_detected": False,
+        "parse_reason": (
+            "hd_saved_game_snapshot"
+            if structure_complete
+            else f"hd_saved_game_snapshot_{structure_scope}"
+        ),
+    }
+    dt = extract_datetime_from_filename(replay_path)
+    stats["played_on"] = dt.isoformat() if dt else None
+    stats = _apply_completion_metadata(stats)
+
+    if capture_engine_evidence:
+        stats["_engine_evidence"] = {
+            "dataset": {
+                "source": f"aoe2mpgame_raw_deflate_{structure_scope}",
+                "artifact_role": "saved_game_snapshot",
+                "validated_gameplay_truth": False,
+                "final_battle_eligible": False,
+                "settlement_evidence_eligible": False,
+                "raw_deflate_complete": True,
+                "snapshot_structure_complete": structure_complete,
+            },
+            "diplomacy": diplomacy,
+            "map_snapshot": map_snapshot,
+            "initial_objects": (
+                _fragment_initial_object_summary(parsed_header)
+                if initial_available
+                else {
+                    "snapshot_scope": "unavailable_without_initial_state",
+                    "object_count": None,
+                    "objects": [],
+                }
+            ),
+            "actions": {
+                "available": False,
+                "count": None,
+                "stream": [],
+            },
+            "chat": {
+                "available": False,
+                "count": None,
+                "stream": [],
+                "scope": "replay_body_unavailable_in_saved_game_snapshot",
+            },
+        }
+
+    logging.warning(
+        "⚠️ candidate-only HD saved-game snapshot decoder used for %s (%s)",
+        replay_path,
+        structure_scope,
+    )
+    return stats, structure_failure, parse_mode
+
+
 def _parse_hd_metadata_fragment_body_bytes(
     replay_path,
     file_bytes,
@@ -1920,6 +2245,17 @@ def _parse_sync_bytes_with_diagnostics(
     capture_engine_evidence=False,
 ):
     _patch_mgz_hd_type9_game_type()
+    if (
+        capture_engine_evidence
+        and os.path.splitext(str(replay_path))[1].casefold() == ".aoe2mpgame"
+    ):
+        # Saved-game snapshots are a private Engine Room evidence lane. The
+        # normal public parser must continue rejecting them as final replays.
+        return _parse_hd_saved_game_snapshot_bytes(
+            replay_path,
+            file_bytes,
+            capture_engine_evidence=True,
+        )
     stage = "header"
     try:
         h = header.parse(file_bytes)

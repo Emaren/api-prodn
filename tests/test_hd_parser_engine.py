@@ -43,6 +43,9 @@ METADATA_FRAGMENT_MANIFEST_PATH = (
 TRAILING_HEADER_MANIFEST_PATH = (
     Path(__file__).parent / "fixtures" / "hd_trailing_header_golden_manifest.json"
 )
+SAVED_GAME_MANIFEST_PATH = (
+    Path(__file__).parent / "fixtures" / "hd_saved_game_golden_manifest.json"
+)
 DEFAULT_GOLDEN_DIR = (
     Path.home()
     / "Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)"
@@ -88,6 +91,12 @@ def _trailing_header_manifest():
     )["fixtures"]
 
 
+def _saved_game_manifest():
+    return json.loads(SAVED_GAME_MANIFEST_PATH.read_text(encoding="utf-8"))[
+        "fixtures"
+    ]
+
+
 def _fragment_golden_dir():
     configured = os.getenv("AOE2_HD_FRAGMENT_GOLDEN_DIR")
     return Path(configured).expanduser() if configured else DEFAULT_FRAGMENT_GOLDEN_DIR
@@ -95,6 +104,14 @@ def _fragment_golden_dir():
 
 def _fragment_golden_path(entry):
     return _fragment_golden_dir() / entry["filename"]
+
+
+def _saved_game_golden_path(entry):
+    configured = os.getenv("AOE2_HD_SAVED_GAME_GOLDEN_DIR")
+    fixture_dir = (
+        Path(configured).expanduser() if configured else _fragment_golden_dir()
+    )
+    return fixture_dir / entry["filename"]
 
 
 @pytest.fixture(scope="module")
@@ -197,13 +214,39 @@ def trailing_header_golden_candidates():
     return manifest, candidates
 
 
+@pytest.fixture(scope="module")
+def saved_game_golden_candidates():
+    manifest = _saved_game_manifest()
+    missing = [
+        entry["filename"]
+        for entry in manifest
+        if not _saved_game_golden_path(entry).is_file()
+    ]
+    if missing:
+        pytest.skip(
+            "HD saved-game goldens are private immutable snapshot bytes; set "
+            "AOE2_HD_SAVED_GAME_GOLDEN_DIR to run them"
+        )
+
+    candidates = {}
+    for expected in manifest:
+        path = _saved_game_golden_path(expected)
+        file_bytes = path.read_bytes()
+        assert hashlib.sha256(file_bytes).hexdigest() == expected["sha256"]
+        candidates[expected["filename"]] = parse_replay_candidate_bytes(
+            expected["filename"],
+            file_bytes,
+        )
+    return manifest, candidates
+
+
 def test_parser_pass_identity_is_explicit_and_idempotent():
     identity = parser_identity(apply_hd_early_exit_rules=True)
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.3"
-    assert identity["pass_version"] == PARSER_PASS_VERSION == "5"
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.4"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "6"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 
@@ -510,6 +553,85 @@ def test_hd_trailing_header_golden_recovers_exact_orphan_chat_and_body(
             "initial_object_count"
         ]
         assert candidate["candidate"]["changes_effective_truth"] is False
+
+
+def test_hd_saved_game_goldens_are_snapshot_evidence_never_final_battles(
+    saved_game_golden_candidates,
+):
+    manifest, candidates = saved_game_golden_candidates
+    for expected in manifest:
+        candidate = candidates[expected["filename"]]
+        projection = candidate["projection"]
+        key_events = projection["key_events"]
+        resolution = projection["team_resolution"]
+        dataset = candidate["evidence"]["dataset"]
+
+        assert candidate["artifact"]["sha256"] == expected["sha256"]
+        assert candidate["artifact"]["byte_size"] == expected["byte_size"]
+        assert candidate["run"]["status"] == expected["run_status"]
+        assert candidate["run"]["parse_mode"] == expected["parse_mode"]
+        if expected["structure_complete"]:
+            assert candidate["run"]["failure"] is None
+        else:
+            assert candidate["run"]["failure"]["stage"] == (
+                "saved_game_snapshot_structure"
+            )
+
+        assert [player["name"] for player in projection["players"]] == expected[
+            "players"
+        ]
+        assert resolution["format"] == expected["format"]
+        assert resolution["status"] == expected["team_status"]
+        assert resolution["result_trusted"] is False
+        assert projection["winner"] == "Unknown"
+        assert projection["completed"] is False
+        assert projection["duration"] == 0
+        assert projection["map"]["id"] == expected["map_id"]
+        assert projection["map"]["name"] == expected["map_name"]
+        assert projection["map"]["dimension"] == expected["map_dimension"]
+        assert projection["game_type"] == expected["game_type"]
+
+        assert key_events["artifact_role"] == "saved_game_snapshot"
+        assert key_events["saved_game_raw_deflate_complete"] is True
+        assert key_events["saved_game_structure_scope"] == expected[
+            "structure_scope"
+        ]
+        assert key_events["saved_game_structure_complete"] is expected[
+            "structure_complete"
+        ]
+        assert key_events["saved_game_decompressed_byte_size"] == expected[
+            "decompressed_byte_size"
+        ]
+        assert key_events["saved_game_undecoded_tail_byte_size"] == expected[
+            "undecoded_tail_byte_size"
+        ]
+        assert key_events["restore_time_ms"] == expected["restore_time_ms"]
+        assert key_events["snapshot_elapsed_seconds"] == expected[
+            "snapshot_elapsed_seconds"
+        ]
+        assert key_events["final_battle_eligible"] is False
+        assert key_events["settlement_evidence_eligible"] is False
+        assert key_events["postgame_available"] is False
+        assert key_events["replay_body_available"] is False
+
+        assert dataset["artifact_role"] == "saved_game_snapshot"
+        assert dataset["raw_deflate_complete"] is True
+        assert dataset["validated_gameplay_truth"] is False
+        assert dataset["final_battle_eligible"] is False
+        assert dataset["settlement_evidence_eligible"] is False
+        assert candidate["actions"]["available"] is False
+        assert candidate["actions"]["count"] is None
+        assert candidate["candidate"]["changes_effective_truth"] is False
+
+
+def test_hd_saved_game_decoder_is_not_available_to_the_public_parser(
+    saved_game_golden_candidates,
+):
+    manifest, _candidates = saved_game_golden_candidates
+    expected = next(entry for entry in manifest if entry["structure_complete"])
+    file_bytes = _saved_game_golden_path(expected).read_bytes()
+
+    assert replay_parser._parse_sync_bytes(expected["filename"], file_bytes) is None
 
 
 def test_hd58_golden_candidates_match_exact_byte_evidence(golden_candidates):
