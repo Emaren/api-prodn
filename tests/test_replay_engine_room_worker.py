@@ -335,13 +335,13 @@ def test_cross_language_worker_identity_golden_vectors() -> None:
     )
 
     assert run_identity_hash == (
-        "bdcb70acfa8d88386173e3d3382bfe01aa4143804d84c241c094ba331b5da4cb"
+        "4f2b7f1d1b911119f90907722452d13aaaa10b532a65bdebefc71ac9ad0044c7"
     )
     assert scope_hash == (
         "9841a68aadb2f0d1ab9b4af7d72a238811d5db20a66e963bde3d0828902a4a68"
     )
     assert job_identity_hash == (
-        "82c31cfbfd1adc5b0648042db339f022bedab0962df7ff7bf789d6d3d852b215"
+        "c67b2f2f85a3e01ca36dec892812273ce6a7caeebc9d1e0e6e4e947c6e1c242b"
     )
 
 

@@ -1,0 +1,64 @@
+{
+  "corpus": "AoE2WAR private HD fragment-recovery goldens",
+  "parser_minimum": "mgz==1.8.51",
+  "fixtures": [
+    {
+      "filename": "1124294135172319df0d8adf1d48b7de5bf788890009e695fdb207b3502d3e52.aoe2record",
+      "sha256": "1124294135172319df0d8adf1d48b7de5bf788890009e695fdb207b3502d3e52",
+      "byte_size": 372140,
+      "players": [
+        "JOJO cant GOGO",
+        "kitakita_papa",
+        "cobygc55",
+        "AC130",
+        "Sla.....",
+        "Jim",
+        "Luigi Bros | 3-PG",
+        "WonderfulShow"
+      ],
+      "format": "4v4",
+      "duration_seconds": 344,
+      "map_id": 13,
+      "map_name": "Coastal",
+      "map_dimension": 120,
+      "raw_action_count": 661,
+      "unique_action_identity_count": 644,
+      "exact_duplicate_packet_excess": 17,
+      "raw_resignation_packet_count": 9,
+      "semantic_resignation_count": 3,
+      "initial_object_count": 792,
+      "body_stream_recovery": true,
+      "body_operation_count": 5985,
+      "result_trusted": false
+    },
+    {
+      "filename": "16f3224a8ea6c88aebd9c94a0003541ef10deb180eb6c9bd6b9fbce1999933ce.aoe2record",
+      "sha256": "16f3224a8ea6c88aebd9c94a0003541ef10deb180eb6c9bd6b9fbce1999933ce",
+      "byte_size": 252041,
+      "players": [
+        "BigNasty",
+        "CAmp",
+        "ak",
+        "OM _Kingsize",
+        "alex",
+        "feerr90",
+        "woloye>>",
+        "Jim"
+      ],
+      "format": "4v4",
+      "duration_seconds": 0,
+      "map_id": 13,
+      "map_name": "Coastal",
+      "map_dimension": 120,
+      "raw_action_count": null,
+      "unique_action_identity_count": null,
+      "exact_duplicate_packet_excess": null,
+      "raw_resignation_packet_count": 0,
+      "semantic_resignation_count": 0,
+      "initial_object_count": 792,
+      "body_stream_recovery": false,
+      "body_operation_count": null,
+      "result_trusted": false
+    }
+  ]
+}

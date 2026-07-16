@@ -15,22 +15,26 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from enum import Enum
 import hashlib
+import io
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import math
 from pathlib import Path
 import re
+import struct
 from typing import Any
 
+from mgz import fast
 from mgz.reference import get_consts
 
 
 PARSER_CONTRACT_VERSION = "1.1"
-PARSER_SCHEMA_VERSION = "2026-07-15.2"
+PARSER_SCHEMA_VERSION = "2026-07-16.1"
 PARSER_IMPLEMENTATION = "aoe2war.mgz_hd"
 PARSER_PASS_NAME = "hd_deterministic_evidence"
-PARSER_PASS_VERSION = "2"
+PARSER_PASS_VERSION = "3"
 MAX_COMPACT_RECEIPT_JSON_BYTES = 32 * 1024
+MAX_FRAGMENT_BODY_OPERATIONS = 2_000_000
 
 PROVENANCE_DIRECT_HEADER = "direct_header"
 PROVENANCE_DIRECT_ACTION = "direct_action"
@@ -906,6 +910,225 @@ def capture_summary_evidence(summary_obj: Any) -> dict[str, Any]:
             "type_counts": {
                 str(action_type): type_counts[action_type]
                 for action_type in sorted(type_counts)
+            },
+            **packet_identity,
+            "raw_activity_by_player": _action_activity_summary(
+                action_stream,
+                duration_ms,
+                players_by_number,
+                metric_lane="raw_parsed_action_packets",
+            ),
+            "identity_normalized_activity_by_player": _action_activity_summary(
+                identity_normalized_actions,
+                duration_ms,
+                players_by_number,
+                metric_lane="experimental_exact_packet_identity_normalized",
+            ),
+            "raw_resignation_timeline": raw_resignations,
+            "resignation_timeline": semantic_resignations,
+            "age_up_research_commands": age_up_commands,
+            "market_commands": market_commands,
+            "tribute_commands": tribute_commands,
+            "stream": action_stream,
+        },
+        "chat": {
+            "available": True,
+            "count": len(chat_stream),
+            "stream": chat_stream,
+        },
+    }
+
+
+def capture_fragment_body_evidence(
+    file_bytes: bytes,
+    *,
+    header_length: int,
+    restore_time_ms: int,
+    players: list[dict[str, Any]],
+    map_snapshot: dict[str, Any],
+    diplomacy: dict[str, Any],
+    initial_objects: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Capture a complete body stream when only a safe header prefix parsed.
+
+    HD 5.x headers can contain a scenario/lobby layout that the canonical mgz
+    header contract cannot finish. The recorded-game body remains independently
+    framed by the exact header length stored in the artifact. This lane parses
+    that body directly, keeps every action as immutable evidence, and never
+    upgrades the partial header into effective/public truth by itself.
+    """
+    if not isinstance(file_bytes, bytes) or len(file_bytes) < 4:
+        raise ValueError("fragment body requires complete replay bytes")
+    if header_length < 4 or header_length >= len(file_bytes):
+        raise ValueError("fragment body header length leaves no complete body")
+
+    handle = io.BytesIO(file_bytes)
+    handle.seek(header_length)
+    fast.meta(handle)
+
+    players_by_number = {
+        number: str(player.get("name") or "")
+        for player in players
+        if isinstance(player, dict)
+        and (number := _integer(player.get("number"))) is not None
+    }
+    try:
+        constants = get_consts()
+    except Exception:
+        constants = {}
+
+    duration_ms = max(0, _integer(restore_time_ms) or 0)
+    operation_counts: Counter[str] = Counter()
+    action_stream: list[dict[str, Any]] = []
+    chat_stream: list[dict[str, Any]] = []
+
+    while sum(operation_counts.values()) < MAX_FRAGMENT_BODY_OPERATIONS:
+        try:
+            operation, payload = fast.operation(handle)
+        except EOFError:
+            break
+
+        operation_name = (
+            _clean_text(getattr(operation, "name", None))
+            or _clean_text(str(operation))
+            or "unclassified"
+        ).casefold()
+        operation_counts[operation_name] += 1
+
+        if operation is fast.Operation.SYNC:
+            duration_ms += max(0, _integer(payload[0]) or 0)
+            continue
+
+        if operation is fast.Operation.ACTION:
+            action_type, raw_payload = payload
+            action_label = (
+                _clean_text(getattr(action_type, "name", None))
+                or _clean_text(str(action_type))
+                or "unclassified"
+            ).replace("Action.", "").casefold()
+            normalized_payload = _normalize_action_payload(
+                raw_payload,
+                {},
+                constants,
+            )
+            player_number = _integer(normalized_payload.get("player_id"))
+            action_stream.append(
+                {
+                    "ordinal": len(action_stream) + 1,
+                    "timestamp_ms": duration_ms,
+                    "type": action_label,
+                    "command_family": _ACTION_FAMILIES.get(
+                        action_label,
+                        "other_command",
+                    ),
+                    "player_number": player_number,
+                    "player_name": players_by_number.get(player_number),
+                    "payload": normalized_payload,
+                    "provenance_class": PROVENANCE_DIRECT_ACTION,
+                }
+            )
+            continue
+
+        if operation is fast.Operation.CHAT:
+            if isinstance(payload, bytes):
+                message = payload.rstrip(b"\x00").decode("utf-8", errors="replace")
+            else:
+                message = str(payload or "")
+            chat_stream.append(
+                {
+                    "ordinal": len(chat_stream) + 1,
+                    "timestamp_ms": duration_ms,
+                    "origination": "game",
+                    "type": "unparsed_body_chat",
+                    "player_number": None,
+                    "message": _clean_text(message),
+                    "audience": None,
+                    "provenance_class": PROVENANCE_DIRECT_ACTION,
+                }
+            )
+
+    if sum(operation_counts.values()) >= MAX_FRAGMENT_BODY_OPERATIONS:
+        raise RuntimeError("fragment body operation safety limit reached")
+
+    identity_normalized_actions, packet_identity = _annotate_action_packet_identities(
+        action_stream
+    )
+    raw_resignations, semantic_resignations = _resignation_lanes(action_stream)
+    action_type_counts = Counter(action.get("type") for action in action_stream)
+    age_up_commands = []
+    market_commands = []
+    tribute_commands = []
+    for action in action_stream:
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        if action.get("type") == "research":
+            technology_id = _integer(payload.get("technology_id"))
+            if technology_id in _AGE_TECHNOLOGIES:
+                age_up_commands.append(
+                    {
+                        "timestamp_ms": action.get("timestamp_ms"),
+                        "player_number": action.get("player_number"),
+                        "player_name": action.get("player_name"),
+                        "technology_id": technology_id,
+                        "age": _AGE_TECHNOLOGIES[technology_id],
+                        "meaning": "research_command_recorded_not_completion_proof",
+                    }
+                )
+        if action.get("type") in {"buy", "sell"}:
+            market_commands.append(
+                {
+                    "timestamp_ms": action.get("timestamp_ms"),
+                    "type": action.get("type"),
+                    "player_number": action.get("player_number"),
+                    "player_name": action.get("player_name"),
+                    "resource_id": payload.get("resource_id"),
+                    "resource": (payload.get("labels") or {}).get("resource"),
+                    "amount": payload.get("amount"),
+                }
+            )
+        if action.get("type") == "tribute":
+            tribute_commands.append(
+                {
+                    "timestamp_ms": action.get("timestamp_ms"),
+                    "player_number": action.get("player_number"),
+                    "player_name": action.get("player_name"),
+                    "recipient_player_number": _integer(payload.get("player_id_to")),
+                    "resource_id": payload.get("resource_id"),
+                    "resource": (payload.get("labels") or {}).get("resource"),
+                    "amount": payload.get("amount"),
+                }
+            )
+
+    body_bytes = file_bytes[header_length:]
+    return {
+        "dataset": {
+            "source": "hd_fragment_header_plus_direct_body",
+            "validated_gameplay_truth": False,
+        },
+        "diplomacy": _json_primitive(diplomacy),
+        "map_snapshot": _json_primitive(map_snapshot),
+        "initial_objects": initial_objects
+        or {
+            "snapshot_scope": "unavailable_in_fragment_body_fallback",
+            "object_count": None,
+            "objects": [],
+        },
+        "actions": {
+            "available": True,
+            "count": len(action_stream),
+            "stream_semantics": (
+                "immutable direct body packet order after byte-declared header boundary"
+            ),
+            "body_stream_sha256": hashlib.sha256(body_bytes).hexdigest(),
+            "body_byte_size": len(body_bytes),
+            "body_stream_complete": handle.tell() >= len(file_bytes),
+            "duration_ms": duration_ms,
+            "operation_count": sum(operation_counts.values()),
+            "operation_type_counts": {
+                key: operation_counts[key] for key in sorted(operation_counts)
+            },
+            "type_counts": {
+                str(action_type): action_type_counts[action_type]
+                for action_type in sorted(action_type_counts)
             },
             **packet_identity,
             "raw_activity_by_player": _action_activity_summary(

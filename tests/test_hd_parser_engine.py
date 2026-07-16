@@ -32,10 +32,16 @@ from utils.replay_parser import parse_replay_candidate_bytes  # noqa: E402
 
 
 MANIFEST_PATH = Path(__file__).parent / "fixtures" / "hd5_8_golden_manifest.json"
+FRAGMENT_MANIFEST_PATH = (
+    Path(__file__).parent / "fixtures" / "hd_fragment_golden_manifest.json"
+)
 DEFAULT_GOLDEN_DIR = (
     Path.home()
     / "Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)"
     / "Steam/steamapps/common/Age2HD/SaveGame"
+)
+DEFAULT_FRAGMENT_GOLDEN_DIR = Path(
+    "/mnt/HC_Volume_105319120/aoe2-parser-engine/golden-fixtures"
 )
 
 
@@ -56,6 +62,19 @@ def _golden_path(entry):
         fixture_dir / f'{entry["sha256"]}{suffix}',
     )
     return next((path for path in candidates if path.is_file()), candidates[0])
+
+
+def _fragment_manifest():
+    return json.loads(FRAGMENT_MANIFEST_PATH.read_text(encoding="utf-8"))["fixtures"]
+
+
+def _fragment_golden_dir():
+    configured = os.getenv("AOE2_HD_FRAGMENT_GOLDEN_DIR")
+    return Path(configured).expanduser() if configured else DEFAULT_FRAGMENT_GOLDEN_DIR
+
+
+def _fragment_golden_path(entry):
+    return _fragment_golden_dir() / entry["filename"]
 
 
 @pytest.fixture(scope="module")
@@ -80,13 +99,39 @@ def golden_candidates():
     return manifest, candidates
 
 
+@pytest.fixture(scope="module")
+def fragment_golden_candidates():
+    manifest = _fragment_manifest()
+    missing = [
+        entry["filename"]
+        for entry in manifest
+        if not _fragment_golden_path(entry).is_file()
+    ]
+    if missing:
+        pytest.skip(
+            "HD fragment goldens are private immutable replay bytes; set "
+            "AOE2_HD_FRAGMENT_GOLDEN_DIR to run them"
+        )
+
+    candidates = {}
+    for expected in manifest:
+        path = _fragment_golden_path(expected)
+        file_bytes = path.read_bytes()
+        assert hashlib.sha256(file_bytes).hexdigest() == expected["sha256"]
+        candidates[expected["filename"]] = parse_replay_candidate_bytes(
+            expected["filename"],
+            file_bytes,
+        )
+    return manifest, candidates
+
+
 def test_parser_pass_identity_is_explicit_and_idempotent():
     identity = parser_identity(apply_hd_early_exit_rules=True)
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-15.2"
-    assert identity["pass_version"] == PARSER_PASS_VERSION == "2"
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.1"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "3"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 
@@ -214,6 +259,61 @@ def test_truncated_golden_bytes_produce_failed_candidate_with_stable_signature(
     assert first["run"]["idempotency_key"] == second["run"]["idempotency_key"]
     assert first["candidate"]["state"] == "failed"
     assert first["candidate"]["semantic_sha256"] is None
+
+
+def test_hd_fragment_goldens_recover_roster_diplomacy_and_bounded_body_truth(
+    fragment_golden_candidates,
+):
+    manifest, candidates = fragment_golden_candidates
+    for expected in manifest:
+        candidate = candidates[expected["filename"]]
+        projection = candidate["projection"]
+        key_events = projection["key_events"]
+        actions = candidate["actions"]
+
+        assert candidate["artifact"]["sha256"] == expected["sha256"]
+        assert candidate["artifact"]["byte_size"] == expected["byte_size"]
+        assert candidate["run"]["status"] == "recovered"
+        assert candidate["run"]["parse_mode"] == (
+            "mgz_hd_fragment_header_body_fallback"
+        )
+        assert candidate["run"]["failure"]["stage"] == "header"
+        assert key_events["header_fragment_boundary"] == "before_lobby"
+        assert key_events["team_source"] == "header_initial_mutual_diplomacy"
+        assert [player["name"] for player in projection["players"]] == expected[
+            "players"
+        ]
+        assert projection["team_resolution"]["format"] == expected["format"]
+        assert projection["team_resolution"]["result_trusted"] is expected[
+            "result_trusted"
+        ]
+        assert projection["duration"] == expected["duration_seconds"]
+        assert projection["map"]["id"] == expected["map_id"]
+        assert projection["map"]["name"] == expected["map_name"]
+        assert projection["map"]["dimension"] == expected["map_dimension"]
+        assert candidate["evidence"]["initial_objects"]["object_count"] == expected[
+            "initial_object_count"
+        ]
+        assert key_events["body_stream_recovery"] is expected[
+            "body_stream_recovery"
+        ]
+        assert key_events["body_operation_count"] == expected[
+            "body_operation_count"
+        ]
+        assert actions.get("count") == expected["raw_action_count"]
+        assert actions.get("unique_action_identity_count") == expected[
+            "unique_action_identity_count"
+        ]
+        assert actions.get("exact_duplicate_packet_excess") == expected[
+            "exact_duplicate_packet_excess"
+        ]
+        assert len(actions.get("raw_resignation_timeline") or []) == expected[
+            "raw_resignation_packet_count"
+        ]
+        assert len(actions.get("resignation_timeline") or []) == expected[
+            "semantic_resignation_count"
+        ]
+        assert candidate["candidate"]["changes_effective_truth"] is False
 
 
 def test_hd58_golden_candidates_match_exact_byte_evidence(golden_candidates):
