@@ -203,8 +203,18 @@ venv/bin/python scripts/run_replay_engine_room_job.py \
   --manifest /mnt/.../reports/recovery-subset.csv \
   --archive-root /mnt/HC_Volume_105319120/aoe2-replay-archive \
   --mode candidate \
-  --parser-python /var/www/AoE2HDBets/api-prodn/venv-mgz1827/bin/python
+  --parser-python /home/tony/.local/share/aoe2hdbets/parser-compat/mgz1827/bin/python
 ```
 
 Compatibility candidates remain private and candidate-only. A successful
 alternate parse does not promote a winner, team, statistic, or public result.
+
+The first production compatibility pass completed July 16, 2026 as job `8`:
+
+- manifest: 8 exact termination-signature artifacts, 19,347,272 bytes;
+- parser identity: `mgz 1.8.27 | schema 2026-07-15.2 | pass 2`;
+- accounting: 7 succeeded, 1 failed, 0 skipped;
+- evidence: 2,402 observations emitted, 593 material observations persisted,
+  and 103,170 raw actions preserved in candidate objects;
+- promotions/public mutation: zero;
+- latest frozen-cohort candidate frontier: 1,696 completed, 329 failed.
