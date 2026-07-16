@@ -26,6 +26,8 @@ from utils.replay_engine_room_worker import (
     candidate_object_path,
     deterministic_gzip,
     enforce_invocation_artifact_limit,
+    external_candidate_parser,
+    load_external_parser_identity,
     normalize_observations,
     reconcile_frozen_manifest,
     require_database_storage_reserve,
@@ -99,6 +101,65 @@ def _candidate(payload: bytes, replay_path: Path) -> dict:
         apply_hd_early_exit_rules=True,
         parse_mode="test",
     )
+
+
+def test_external_parser_identity_is_part_of_job_identity(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    archive_path = _archive_file(archive_root, b"external parser identity")
+    manifest_path = tmp_path / "manifest.csv"
+    _manifest(manifest_path, archive_root, archive_path)
+    report = reconcile_frozen_manifest(manifest_path, archive_root)
+    identity = load_external_parser_identity(
+        Path(sys.executable),
+        apply_hd_early_exit_rules=True,
+    )
+    default_spec = build_job_spec(
+        report,
+        apply_hd_early_exit_rules=True,
+        batch_size=1,
+    )
+    external_spec = build_job_spec(
+        report,
+        apply_hd_early_exit_rules=True,
+        batch_size=1,
+        parser_identity_override=identity,
+    )
+
+    assert external_spec.parser == identity
+    repeated_external_spec = build_job_spec(
+        report,
+        apply_hd_early_exit_rules=True,
+        batch_size=1,
+        parser_identity_override=identity,
+    )
+    assert external_spec.job_identity_hash == repeated_external_spec.job_identity_hash
+    if identity != default_spec.parser:
+        assert external_spec.job_identity_hash != default_spec.job_identity_hash
+
+    changed_identity = dict(identity)
+    changed_identity["implementation_version"] = "compatibility-fixture"
+    changed_spec = build_job_spec(
+        report,
+        apply_hd_early_exit_rules=True,
+        batch_size=1,
+        parser_identity_override=changed_identity,
+    )
+    assert changed_spec.job_identity_hash != default_spec.job_identity_hash
+
+
+def test_external_candidate_parser_returns_structured_failed_candidate(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "broken.aoe2record"
+    payload = b"not a replay"
+    artifact.write_bytes(payload)
+    parser = external_candidate_parser(Path(sys.executable), timeout_seconds=30)
+
+    candidate = parser(str(artifact), payload, True)
+
+    assert candidate["artifact"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert candidate["run"]["status"] == "failed"
+    assert candidate["candidate"]["changes_effective_truth"] is False
 
 
 def test_plan_reconciles_every_byte_without_creating_output(tmp_path: Path) -> None:

@@ -27,6 +27,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
@@ -60,6 +61,8 @@ REQUIRED_ENGINE_ROOM_TABLES = {
     "replay_reprocess_job_events",
 }
 TERMINAL_JOB_EVENTS = {"completed", "failed", "cancelled"}
+API_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_CANDIDATE_CLI = API_ROOT / "scripts" / "parse_replay_candidate.py"
 
 
 class ReconciliationError(ValueError):
@@ -535,14 +538,31 @@ def build_job_spec(
     *,
     apply_hd_early_exit_rules: bool,
     batch_size: int,
+    parser_identity_override: Mapping[str, Any] | None = None,
 ) -> JobSpec:
     if not report.ok:
         raise ReconciliationError("cannot build a job from a failed reconciliation")
     if batch_size < 1 or batch_size > min(500, report.manifest_rows):
         raise ValueError("batch_size must be between 1 and min(500, manifest rows)")
-    identity = parser_identity(
+    identity = dict(parser_identity_override) if parser_identity_override else parser_identity(
         apply_hd_early_exit_rules=apply_hd_early_exit_rules
     )
+    required_identity = {
+        "implementation",
+        "implementation_version",
+        "schema_version",
+        "pass_name",
+        "pass_version",
+        "options",
+    }
+    if not required_identity.issubset(identity):
+        raise ValueError("parser identity override is incomplete")
+    if not isinstance(identity.get("options"), Mapping):
+        raise ValueError("parser identity options must be an object")
+    if identity["options"].get("apply_hd_early_exit_rules") is not bool(
+        apply_hd_early_exit_rules
+    ):
+        raise ValueError("parser identity options differ from the requested pass")
     parser_config_hash = stable_hash(identity.get("options") or {})
     scope = {
         "version": 1,
@@ -574,6 +594,120 @@ def build_job_spec(
         batch_size=batch_size,
         max_artifacts=report.manifest_rows,
     )
+
+
+def _external_parser_environment() -> dict[str, str]:
+    """Return the deliberately tiny environment inherited by parser subprocesses."""
+    environment = {
+        "PYTHONPATH": str(API_ROOT),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUNBUFFERED": "1",
+    }
+    if os.environ.get("PATH"):
+        environment["PATH"] = os.environ["PATH"]
+    return environment
+
+
+def validate_external_parser_python(value: Path) -> Path:
+    interpreter = value.expanduser().resolve()
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        raise ValueError("external parser Python must be an executable file")
+    if not LOCAL_CANDIDATE_CLI.is_file():
+        raise ValueError("local candidate parser CLI is missing")
+    return interpreter
+
+
+def load_external_parser_identity(
+    python_executable: Path,
+    *,
+    apply_hd_early_exit_rules: bool,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    """Probe an isolated parser runtime without inheriting application secrets."""
+    interpreter = validate_external_parser_python(python_executable)
+    if timeout_seconds < 1 or timeout_seconds > 300:
+        raise ValueError("external parser identity timeout must be between 1 and 300 seconds")
+    expression = (
+        "import json; from utils.replay_engine import parser_identity; "
+        "print(json.dumps(parser_identity(apply_hd_early_exit_rules="
+        f"{bool(apply_hd_early_exit_rules)!r}), sort_keys=True))"
+    )
+    try:
+        completed = subprocess.run(
+            [str(interpreter), "-c", expression],
+            cwd=API_ROOT,
+            env=_external_parser_environment(),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError("external parser identity probe timed out") from error
+    if completed.returncode != 0:
+        raise ValueError("external parser identity probe failed")
+    try:
+        identity = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("external parser identity probe returned invalid JSON") from error
+    if not isinstance(identity, dict):
+        raise ValueError("external parser identity probe returned no identity object")
+    return identity
+
+
+def external_candidate_parser(
+    python_executable: Path,
+    *,
+    timeout_seconds: int = 900,
+) -> Callable[[str, bytes, bool], dict[str, Any]]:
+    """Build a worker callable backed by one explicitly isolated parser runtime."""
+    interpreter = validate_external_parser_python(python_executable)
+    if timeout_seconds < 10 or timeout_seconds > 3600:
+        raise ValueError("external parser timeout must be between 10 and 3600 seconds")
+
+    def parse(
+        replay_path: str,
+        file_bytes: bytes,
+        apply_hd_early_exit_rules: bool,
+    ) -> dict[str, Any]:
+        artifact_path = Path(replay_path).expanduser().resolve()
+        expected_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        command = [
+            str(interpreter),
+            str(LOCAL_CANDIDATE_CLI),
+            str(artifact_path),
+            "--expected-sha256",
+            expected_sha256,
+            "--source-name",
+            str(artifact_path),
+        ]
+        if not apply_hd_early_exit_rules:
+            command.append("--no-hd-early-exit-rules")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=API_ROOT,
+                env=_external_parser_environment(),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("external candidate parser timed out") from error
+        # Exit 2 is the candidate CLI's structured parse-failure result. Its
+        # stdout still carries a valid immutable failed candidate envelope.
+        if completed.returncode not in {0, 2}:
+            raise RuntimeError("external candidate parser process failed")
+        try:
+            candidate = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("external candidate parser returned invalid JSON") from error
+        if not isinstance(candidate, dict):
+            raise RuntimeError("external candidate parser returned no candidate object")
+        return candidate
+
+    return parse
 
 
 def _deterministic_gzip_bytes(canonical: bytes) -> bytes:

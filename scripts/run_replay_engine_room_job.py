@@ -25,6 +25,8 @@ from utils.replay_engine_room_worker import (  # noqa: E402
     ReconciliationError,
     WorkerPaused,
     build_job_spec,
+    external_candidate_parser,
+    load_external_parser_identity,
     reconcile_frozen_manifest,
     run_candidate_job,
 )
@@ -96,6 +98,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="changes parser pass identity; keep the default for the frozen HD pass",
     )
+    parser.add_argument(
+        "--parser-python",
+        type=Path,
+        help=(
+            "explicit isolated Python runtime for a compatibility parser pass; "
+            "its parser identity becomes part of the immutable job/run identity"
+        ),
+    )
+    parser.add_argument(
+        "--parser-timeout-seconds",
+        type=int,
+        default=900,
+        help="per-artifact timeout for an isolated parser runtime (10-3600)",
+    )
     return parser.parse_args()
 
 
@@ -119,6 +135,8 @@ def main() -> int:
         and args.max_artifacts_this_run < 1
     ):
         raise SystemExit("--max-artifacts-this-run must be a positive integer")
+    if args.parser_timeout_seconds < 10 or args.parser_timeout_seconds > 3600:
+        raise SystemExit("--parser-timeout-seconds must be between 10 and 3600")
 
     try:
         report = reconcile_frozen_manifest(args.manifest, args.archive_root)
@@ -149,26 +167,44 @@ def main() -> int:
         return 2
 
     try:
+        apply_hd_early_exit_rules = not args.no_hd_early_exit_rules
+        parser_identity_override = None
+        parser_callable = None
+        if args.parser_python:
+            parser_identity_override = load_external_parser_identity(
+                args.parser_python,
+                apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+            )
+            parser_callable = external_candidate_parser(
+                args.parser_python,
+                timeout_seconds=args.parser_timeout_seconds,
+            )
         spec = build_job_spec(
             report,
-            apply_hd_early_exit_rules=not args.no_hd_early_exit_rules,
+            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
             batch_size=min(args.batch_size, report.manifest_rows),
+            parser_identity_override=parser_identity_override,
         )
+        run_options = {
+            "database_url": args.database_url,
+            "jobs_root": args.jobs_root,
+            "submitter_uid_override": args.submitter_uid,
+            "requested_by_uid": args.requested_by_uid,
+            "worker_key": args.worker_key,
+            "min_free_bytes": int(args.min_free_gib * 1024**3),
+            "database_storage_path": args.database_storage_path,
+            "database_min_free_bytes": int(
+                args.database_root_reserve_gib * 1024**3
+            ),
+            "max_artifacts_this_run": args.max_artifacts_this_run,
+            "apply_hd_early_exit_rules": apply_hd_early_exit_rules,
+        }
+        if parser_callable is not None:
+            run_options["parser_callable"] = parser_callable
         result = run_candidate_job(
             report,
             spec,
-            database_url=args.database_url,
-            jobs_root=args.jobs_root,
-            submitter_uid_override=args.submitter_uid,
-            requested_by_uid=args.requested_by_uid,
-            worker_key=args.worker_key,
-            min_free_bytes=int(args.min_free_gib * 1024**3),
-            database_storage_path=args.database_storage_path,
-            database_min_free_bytes=int(
-                args.database_root_reserve_gib * 1024**3
-            ),
-            max_artifacts_this_run=args.max_artifacts_this_run,
-            apply_hd_early_exit_rules=not args.no_hd_early_exit_rules,
+            **run_options,
         )
     except WorkerPaused as error:
         print_json(

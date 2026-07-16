@@ -181,3 +181,30 @@ The production candidate command is intentionally not part of a normal API
 service start. Run it only after the read-only plan is clean, the migration is
 present, the archive is mounted, and the mounted-volume free-space reserve is
 confirmed.
+
+## Isolated compatibility passes
+
+`run_replay_engine_room_job.py --parser-python <absolute-python>` runs each
+candidate through one explicit isolated Python runtime. The probed library
+version is included in the immutable parser, run, and job identities, so a
+compatibility run cannot reuse an existing run from another mgz version. The
+child receives a minimal environment with no database URL or app credentials;
+the same candidate-only validation and mounted-volume storage gates still
+apply.
+
+The researched HD body-stream compatibility runtime is provisioned separately
+from the API service with `requirements-parser-compat.txt` (`mgz==1.8.27`). It
+must never replace the service venv or canonical `mgz==1.8.51` requirement.
+Use `subset_replay_manifest.py` to create a new mode-0600 manifest containing
+only exact classified artifact hashes; do not rerun the full frozen cohort.
+
+```bash
+venv/bin/python scripts/run_replay_engine_room_job.py \
+  --manifest /mnt/.../reports/recovery-subset.csv \
+  --archive-root /mnt/HC_Volume_105319120/aoe2-replay-archive \
+  --mode candidate \
+  --parser-python /var/www/AoE2HDBets/api-prodn/venv-mgz1827/bin/python
+```
+
+Compatibility candidates remain private and candidate-only. A successful
+alternate parse does not promote a winner, team, statistic, or public result.

@@ -1,0 +1,7 @@
+# Isolated candidate-only compatibility runtime. This is deliberately separate
+# from the API service venv and must never replace requirements.txt.
+aiofiles==25.1.0
+aocref==2.0.37
+construct==2.8.16
+mgz==1.8.27
+tabulate==0.10.0
