@@ -256,7 +256,7 @@ def load_candidate(run: Mapping[str, Any]) -> dict[str, Any]:
         expected_compressed_sha256=str(run["candidate_output_hash"]),
         expected_compressed_byte_size=int(run["candidate_output_byte_size"]),
         expected_artifact_sha256=str(run["input_hash"]),
-        expected_run_idempotency_key=str(run["idempotency_key"]),
+        expected_run_idempotency_key=str(run["run_idempotency_key"]),
         expected_semantic_sha256=metrics.get("candidate_semantic_sha256"),
     )
 
