@@ -98,6 +98,22 @@ and 1 map prefix. Use `scripts/audit_hd_saved_game_snapshots.py` for the bounded
 structural audit; do not throw these containers back through the recorded-game
 parser or describe them as final battles.
 
+`scripts/report_saved_game_continuation_links.py` is the read-only continuation
+identity rail. It joins the latest completed candidates only when the direct HD
+`platform_match_id`, normalized player-name roster, and non-zero Steam-ID roster
+all match exactly. Its private mode-`0600` JSON/CSV reports create no effective
+result, settlement evidence, or public aggregate. The Campaign III checkpoint
+found 98 shared match IDs linking 113 saved checkpoints to 98 recorded-game
+candidates; all 113 candidate pairs had exact rosters. Ninety IDs were
+one-to-one and eight represented multiple saved checkpoints of one later
+recording. The other 89 saved checkpoints remain unlinked rather than being
+fuzzy-matched.
+
+```bash
+venv/bin/python scripts/report_saved_game_continuation_links.py \
+  --label saved-game-continuation-links-campaign3-20260717
+```
+
 ## Reviewed effective result projector
 
 `scripts/project_replay_candidate_results.py` is not part of the candidate
