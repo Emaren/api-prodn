@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("plan", "apply"), default="plan")
     parser.add_argument("--receipt-root", type=Path, default=DEFAULT_RECEIPT_ROOT)
     parser.add_argument("--authorization-label", default="operator-reviewed")
+    parser.add_argument(
+        "--include-projections",
+        action="store_true",
+        help="Include full before/after payloads in stdout (private receipts always retain them).",
+    )
     return parser.parse_args()
 
 
@@ -202,6 +207,8 @@ def projection_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:
         "event_types": row.get("event_types"),
         "key_events": row.get("key_events"),
         "disconnect_detected": row.get("disconnect_detected"),
+        "parse_source": row.get("parse_source"),
+        "parse_reason": row.get("parse_reason"),
     }
 
 
@@ -223,6 +230,15 @@ def build_after_projection(
 
     current_events = deepcopy(dict(_mapping(current.get("key_events"))))
     candidate_events = deepcopy(dict(_mapping(projection.get("key_events"))))
+    # The candidate's parser_engine node is a large private audit envelope. The
+    # effective row only needs the compact, content-addressed projection marker.
+    candidate_events.pop("parser_engine", None)
+    for stale_key in (
+        "parse_failed",
+        "parse_failure_detail",
+        "watcher_final_unparsed",
+    ):
+        current_events.pop(stale_key, None)
     current_events.update(candidate_events)
     current_events["engine_room_effective_projection"] = {
         "policy_version": POLICY_VERSION,
@@ -246,6 +262,10 @@ def build_after_projection(
         "event_types": projection.get("event_types") or [],
         "key_events": current_events,
         "disconnect_detected": bool(projection.get("disconnect_detected")),
+        # Preserve where the replay entered the system while replacing the stale
+        # watcher_final_unparsed reason with the adjudicated Engine Room outcome.
+        "parse_source": current.get("parse_source") or "watcher_final",
+        "parse_reason": "engine_room_trusted_result",
     }
 
 
@@ -504,7 +524,9 @@ def apply_plans(
                   players = %s,
                   event_types = %s,
                   key_events = %s,
-                  disconnect_detected = %s
+                  disconnect_detected = %s,
+                  parse_source = %s,
+                  parse_reason = %s
                 WHERE id = %s
                 """,
                 (
@@ -518,6 +540,8 @@ def apply_plans(
                     Jsonb(after["event_types"]),
                     Jsonb(after["key_events"]),
                     after["disconnect_detected"],
+                    after["parse_source"],
+                    after["parse_reason"],
                     game_id,
                 ),
             )
@@ -600,7 +624,7 @@ def apply_plans(
                       observation_id, game_stats_id, idempotency_key,
                       promotion_key, decision_hash, policy_version,
                       reason, affects_public_aggregates
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
                     """,
                     (
                         int(observation["id"]),
@@ -671,7 +695,18 @@ def main() -> int:
         "classifications": dict(sorted(classifications.items())),
         "financial_mutations": 0,
         "chain_transactions": 0,
-        "plans": plans,
+        "plans": (
+            plans
+            if args.include_projections
+            else [
+                {
+                    key: value
+                    for key, value in plan.items()
+                    if key not in {"before_projection", "after_projection"}
+                }
+                for plan in plans
+            ]
+        ),
         "applied": applied,
     }
     print(json.dumps(output, indent=2, sort_keys=True, default=str))

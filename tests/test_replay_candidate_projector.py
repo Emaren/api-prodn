@@ -60,6 +60,8 @@ def current(**overrides):
         "event_types": [],
         "key_events": {"watcher_upload": True},
         "disconnect_detected": False,
+        "parse_source": "watcher_final",
+        "parse_reason": "watcher_final_unparsed",
     }
     value.update(overrides)
     return value
@@ -115,11 +117,27 @@ def test_known_effective_result_matches_or_blocks_candidate():
 
 
 def test_projection_marks_every_winning_teammate_and_preserves_watcher_context():
-    after = build_after_projection(current(), candidate(), parse_run_id=99)
+    effective = current(
+        key_events={
+            "watcher_upload": True,
+            "parse_failed": True,
+            "parse_failure_detail": "old parser failed",
+            "watcher_final_unparsed": True,
+        }
+    )
+    fixture = candidate()
+    fixture["projection"]["key_events"]["parser_engine"] = {"large": "private"}
+    after = build_after_projection(effective, fixture, parse_run_id=99)
     winners = [player["name"] for player in after["players"] if player["winner"]]
     assert winners == ["Alpha", "Bravo"]
     assert after["winner"] is None
     assert after["key_events"]["watcher_upload"] is True
+    assert "parse_failed" not in after["key_events"]
+    assert "parse_failure_detail" not in after["key_events"]
+    assert "watcher_final_unparsed" not in after["key_events"]
+    assert "parser_engine" not in after["key_events"]
+    assert after["parse_source"] == "watcher_final"
+    assert after["parse_reason"] == "engine_room_trusted_result"
     receipt = after["key_events"]["engine_room_effective_projection"]
     assert receipt["source_parse_run_id"] == 99
     assert receipt["financial_impact_classification"] == (
