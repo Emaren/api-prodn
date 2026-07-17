@@ -4,6 +4,11 @@ This worker replays a frozen CSV manifest through the deterministic HD parser
 without changing current game truth. It is a private evidence lane: no
 `game_stats`, public aggregate, market, bet, or settlement row is written.
 
+The current canonical identity is `aoe2war.mgz_hd` / `mgz 1.8.51`, schema
+`2026-07-16.4`, pass `hd_deterministic_evidence` version `6`. The latest
+immutable disposition for the frozen 2,025-artifact campaign is 2,025 completed
+and zero failed. Historical failed runs are retained.
+
 ## Safety contract
 
 - `plan`/`--dry-run` reads the CSV and every replay byte, validates the
@@ -78,6 +83,36 @@ the worker checks the filesystem containing `--database-storage-path` (default
 changed but never below 1 GiB. On a VPS where PGDATA is on another filesystem,
 point `--database-storage-path` at PGDATA or another existing path on that same
 filesystem.
+
+## Saved-game checkpoints
+
+The evidence worker has a candidate-only `.aoe2mpgame` lane. It inflates the HD
+raw-DEFLATE container with a 64 MiB output bound, then attempts the strongest
+deterministic structure in order: complete snapshot, complete initial-state
+prefix, map/roster prefix. Public replay ingestion still rejects this suffix.
+
+Every saved candidate is duration zero, winner unknown,
+`final_battle_eligible = false`, and `settlement_evidence_eligible = false`.
+The completed campaign produced 196 complete snapshots, 5 initial prefixes,
+and 1 map prefix. Use `scripts/audit_hd_saved_game_snapshots.py` for the bounded
+structural audit; do not throw these containers back through the recorded-game
+parser or describe them as final battles.
+
+## Reviewed effective result projector
+
+`scripts/project_replay_candidate_results.py` is not part of the candidate
+worker. It is a separately authorized, plan-first rail for a named game-ID
+cohort. Its strict gates reject saved checkpoints, accepted adjudications,
+financial links, known/conflicting results, incomplete rosters/teams, untrusted
+provenance, and incomplete games.
+
+Before apply, take and validate a production database backup. Apply creates a
+mode-`0600`, content-addressed receipt under
+`/mnt/HC_Volume_105319120/aoe2-parser-engine/promotions`, links it into the
+immutable evidence ledger, and appends private result/team promotion facts.
+It has no financial or chain write path. A transaction failure removes only
+new unlinked receipt files. A second apply must report `matches_effective_truth`
+and reuse every existing receipt.
 
 ## Commands
 
