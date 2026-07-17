@@ -394,7 +394,10 @@ def load_plan_rows(
     return plans
 
 
-def write_private_receipt(root: Path, receipt: Mapping[str, Any]) -> tuple[Path, bytes]:
+def write_private_receipt(
+    root: Path,
+    receipt: Mapping[str, Any],
+) -> tuple[Path, bytes, bool]:
     root = root.expanduser().resolve()
     if not str(root).startswith("/mnt/"):
         raise RuntimeError("promotion receipts must live beneath /mnt")
@@ -406,7 +409,7 @@ def write_private_receipt(root: Path, receipt: Mapping[str, Any]) -> tuple[Path,
     if destination.exists():
         if destination.read_bytes() != payload or destination.stat().st_mode & 0o777 != 0o600:
             raise RuntimeError("existing promotion receipt failed integrity validation")
-        return destination, payload
+        return destination, payload, False
     with tempfile.NamedTemporaryFile(
         mode="wb",
         prefix=".projection-receipt-",
@@ -423,7 +426,7 @@ def write_private_receipt(root: Path, receipt: Mapping[str, Any]) -> tuple[Path,
         os.link(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
-    return destination, payload
+    return destination, payload, True
 
 
 def apply_plans(
@@ -485,7 +488,7 @@ def apply_plans(
             "applied_at": applied_at,
             **plan,
         }
-        path, payload = write_private_receipt(receipt_root, receipt)
+        path, payload, receipt_created = write_private_receipt(receipt_root, receipt)
         prepared.append(
             {
                 "plan": plan,
@@ -493,158 +496,19 @@ def apply_plans(
                 "receipt_path": path,
                 "receipt_bytes": payload,
                 "receipt_sha256": hashlib.sha256(payload).hexdigest(),
+                "receipt_created": receipt_created,
             }
         )
 
-    with connection.transaction():
+    try:
+        with connection.transaction():
+            for item in prepared:
+                _apply_prepared_projection(connection, item)
+    except Exception:
         for item in prepared:
-            plan = item["plan"]
-            game_id = int(plan["game_stats_id"])
-            current = connection.execute(
-                "SELECT * FROM game_stats WHERE id = %s FOR UPDATE",
-                (game_id,),
-            ).fetchone()
-            if not current:
-                raise RuntimeError(f"GameStats {game_id} disappeared before apply")
-            if stable_hash(projection_snapshot(current)) != stable_hash(
-                plan["before_projection"]
-            ):
-                raise RuntimeError(f"GameStats {game_id} changed after the plan was built")
-
-            after = plan["after_projection"]
-            connection.execute(
-                """
-                UPDATE game_stats SET
-                  game_version = %s,
-                  map = %s,
-                  game_type = %s,
-                  duration = %s,
-                  game_duration = %s,
-                  winner = %s,
-                  players = %s,
-                  event_types = %s,
-                  key_events = %s,
-                  disconnect_detected = %s,
-                  parse_source = %s,
-                  parse_reason = %s
-                WHERE id = %s
-                """,
-                (
-                    after["game_version"],
-                    Jsonb(after["map"]),
-                    after["game_type"],
-                    after["duration"],
-                    after["game_duration"],
-                    after["winner"],
-                    Jsonb(after["players"]),
-                    Jsonb(after["event_types"]),
-                    Jsonb(after["key_events"]),
-                    after["disconnect_detected"],
-                    after["parse_source"],
-                    after["parse_reason"],
-                    game_id,
-                ),
-            )
-
-            evidence = connection.execute(
-                """
-                INSERT INTO replay_evidence_artifacts (
-                  sha256, byte_size, storage_provider, storage_key,
-                  evidence_kind, media_type, source_parse_run_id,
-                  source_candidate_output_hash, captured_at, metadata
-                ) VALUES (%s, %s, 'filesystem', %s,
-                  'effective_projection_receipt', 'application/json', %s,
-                  %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    item["receipt_sha256"],
-                    len(item["receipt_bytes"]),
-                    str(item["receipt_path"]),
-                    plan["source_parse_run_id"],
-                    plan["source_candidate_output_hash"],
-                    applied_at,
-                    Jsonb(
-                        {
-                            "game_stats_id": game_id,
-                            "decision_hash": plan["decision_hash"],
-                            "policy_version": POLICY_VERSION,
-                            "classification": plan["classification"],
-                            "financial_impact_classification": plan[
-                                "financial_impact_classification"
-                            ],
-                            "affects_public_aggregates": True,
-                            "affects_financial_history": False,
-                        }
-                    ),
-                ),
-            ).fetchone()
-            evidence_id = int(evidence["id"])
-            connection.execute(
-                """
-                INSERT INTO replay_evidence_links (
-                  evidence_artifact_id, parse_run_id, idempotency_key,
-                  purpose, metadata
-                ) VALUES (%s, %s, %s, 'effective_projection_receipt', %s)
-                """,
-                (
-                    evidence_id,
-                    plan["source_parse_run_id"],
-                    f"effective-projection-receipt:{item['receipt_sha256']}",
-                    Jsonb({"game_stats_id": game_id}),
-                ),
-            )
-
-            observations = connection.execute(
-                """
-                SELECT id, field_path FROM replay_observations
-                WHERE parse_run_id = %s
-                  AND field_path IN ('result.winning_player_keys', 'teams.resolution')
-                ORDER BY field_path
-                """,
-                (plan["source_parse_run_id"],),
-            ).fetchall()
-            if {row["field_path"] for row in observations} != {
-                "result.winning_player_keys",
-                "teams.resolution",
-            }:
-                raise RuntimeError(f"GameStats {game_id} lacks promotion observations")
-            for observation in observations:
-                promotion_key = f"game:{game_id}:{observation['field_path']}:effective-v1"
-                promotion_material = {
-                    "decision_hash": plan["decision_hash"],
-                    "observation_id": int(observation["id"]),
-                    "promotion_key": promotion_key,
-                    "receipt_sha256": item["receipt_sha256"],
-                }
-                promotion_hash = stable_hash(promotion_material)
-                connection.execute(
-                    """
-                    INSERT INTO replay_observation_promotions (
-                      observation_id, game_stats_id, idempotency_key,
-                      promotion_key, decision_hash, policy_version,
-                      reason, affects_public_aggregates
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
-                    """,
-                    (
-                        int(observation["id"]),
-                        game_id,
-                        f"effective-promotion:{promotion_hash}",
-                        promotion_key,
-                        promotion_hash,
-                        POLICY_VERSION,
-                        json.dumps(
-                            {
-                                "reason": "Strict candidate result projection passed all gates.",
-                                "receipt_sha256": item["receipt_sha256"],
-                                "financial_impact_classification": plan[
-                                    "financial_impact_classification"
-                                ],
-                            },
-                            sort_keys=True,
-                        ),
-                    ),
-                )
+            if item["receipt_created"]:
+                item["receipt_path"].unlink(missing_ok=True)
+        raise
 
     return reused + [
         {
@@ -656,6 +520,159 @@ def apply_plans(
         }
         for item in prepared
     ]
+
+
+def _apply_prepared_projection(
+    connection: psycopg.Connection,
+    item: Mapping[str, Any],
+) -> None:
+    plan = item["plan"]
+    game_id = int(plan["game_stats_id"])
+    current = connection.execute(
+        "SELECT * FROM game_stats WHERE id = %s FOR UPDATE",
+        (game_id,),
+    ).fetchone()
+    if not current:
+        raise RuntimeError(f"GameStats {game_id} disappeared before apply")
+    if stable_hash(projection_snapshot(current)) != stable_hash(
+        plan["before_projection"]
+    ):
+        raise RuntimeError(f"GameStats {game_id} changed after the plan was built")
+
+    after = plan["after_projection"]
+    connection.execute(
+        """
+        UPDATE game_stats SET
+          game_version = %s,
+          map = %s,
+          game_type = %s,
+          duration = %s,
+          game_duration = %s,
+          winner = %s,
+          players = %s,
+          event_types = %s,
+          key_events = %s,
+          disconnect_detected = %s,
+          parse_source = %s,
+          parse_reason = %s
+        WHERE id = %s
+        """,
+        (
+            after["game_version"],
+            Jsonb(after["map"]),
+            after["game_type"],
+            after["duration"],
+            after["game_duration"],
+            after["winner"],
+            Jsonb(after["players"]),
+            Jsonb(after["event_types"]),
+            Jsonb(after["key_events"]),
+            after["disconnect_detected"],
+            after["parse_source"],
+            after["parse_reason"],
+            game_id,
+        ),
+    )
+
+    evidence = connection.execute(
+        """
+        INSERT INTO replay_evidence_artifacts (
+          sha256, byte_size, storage_provider, storage_key,
+          evidence_kind, media_type, source_parse_run_id,
+          source_candidate_output_hash, captured_at, metadata
+        ) VALUES (%s, %s, 'filesystem', %s,
+          'effective_projection_receipt', 'application/json', %s,
+          %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            item["receipt_sha256"],
+            len(item["receipt_bytes"]),
+            str(item["receipt_path"]),
+            plan["source_parse_run_id"],
+            plan["source_candidate_output_hash"],
+            item["receipt"]["applied_at"],
+            Jsonb(
+                {
+                    "game_stats_id": game_id,
+                    "decision_hash": plan["decision_hash"],
+                    "policy_version": POLICY_VERSION,
+                    "classification": plan["classification"],
+                    "financial_impact_classification": plan[
+                        "financial_impact_classification"
+                    ],
+                    "affects_public_aggregates": True,
+                    "affects_financial_history": False,
+                }
+            ),
+        ),
+    ).fetchone()
+    evidence_id = int(evidence["id"])
+    connection.execute(
+        """
+        INSERT INTO replay_evidence_links (
+          evidence_artifact_id, parse_run_id, idempotency_key,
+          purpose, metadata
+        ) VALUES (%s, %s, %s, 'effective_projection_receipt', %s)
+        """,
+        (
+            evidence_id,
+            plan["source_parse_run_id"],
+            f"effective-projection-receipt:{item['receipt_sha256']}",
+            Jsonb({"game_stats_id": game_id}),
+        ),
+    )
+
+    observations = connection.execute(
+        """
+        SELECT id, field_path FROM replay_observations
+        WHERE parse_run_id = %s
+          AND field_path IN ('result.winning_player_keys', 'teams.resolution')
+        ORDER BY field_path
+        """,
+        (plan["source_parse_run_id"],),
+    ).fetchall()
+    if {row["field_path"] for row in observations} != {
+        "result.winning_player_keys",
+        "teams.resolution",
+    }:
+        raise RuntimeError(f"GameStats {game_id} lacks promotion observations")
+    for observation in observations:
+        promotion_key = f"game:{game_id}:{observation['field_path']}:effective-v1"
+        promotion_material = {
+            "decision_hash": plan["decision_hash"],
+            "observation_id": int(observation["id"]),
+            "promotion_key": promotion_key,
+            "receipt_sha256": item["receipt_sha256"],
+        }
+        promotion_hash = stable_hash(promotion_material)
+        connection.execute(
+            """
+            INSERT INTO replay_observation_promotions (
+              observation_id, game_stats_id, idempotency_key,
+              promotion_key, decision_hash, policy_version,
+              reason, affects_public_aggregates
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+            """,
+            (
+                int(observation["id"]),
+                game_id,
+                f"effective-promotion:{promotion_hash}",
+                promotion_key,
+                promotion_hash,
+                POLICY_VERSION,
+                json.dumps(
+                    {
+                        "reason": "Strict candidate result projection passed all gates.",
+                        "receipt_sha256": item["receipt_sha256"],
+                        "financial_impact_classification": plan[
+                            "financial_impact_classification"
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
 
 
 def main() -> int:
