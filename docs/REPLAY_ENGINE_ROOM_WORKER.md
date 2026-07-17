@@ -260,7 +260,9 @@ venv/bin/python scripts/run_replay_engine_room_job.py \
 Compatibility candidates remain private and candidate-only. A successful
 alternate parse does not promote a winner, team, statistic, or public result.
 
-The first production compatibility pass completed July 16, 2026 as job `8`:
+The first production compatibility pass completed July 16, 2026 as job `8`.
+This is a historical post-job-8 checkpoint, superseded by the later canonical
+Campaign III recovery pass:
 
 - manifest: 8 exact termination-signature artifacts, 19,347,272 bytes;
 - parser identity: `mgz 1.8.27 | schema 2026-07-15.2 | pass 2`;
@@ -268,4 +270,5 @@ The first production compatibility pass completed July 16, 2026 as job `8`:
 - evidence: 2,402 observations emitted, 593 material observations persisted,
   and 103,170 raw actions preserved in candidate objects;
 - promotions/public mutation: zero;
-- latest frozen-cohort candidate frontier: 1,696 completed, 329 failed.
+- post-job-8 frozen-cohort candidate frontier: 1,696 completed, 329 failed;
+- final Campaign III frozen-cohort frontier: 2,025 completed, 0 failed.
