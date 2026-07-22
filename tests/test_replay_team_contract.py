@@ -230,3 +230,67 @@ def test_golden_hd_no_resignation_keeps_result_unresolved():
     assert result["winning_player_keys"] == []
     assert result["result_status"] == "review_required"
     assert result["result_trusted"] is False
+
+
+
+def test_postgame_can_trust_winner_flags_concentrated_on_one_explicit_team():
+    players = [
+        {"name": "Alpha", "number": 1, "team_id": 0, "winner": True},
+        {"name": "Bravo", "number": 2, "team_id": 0, "winner": None},
+        {"name": "Charlie", "number": 3, "team_id": 1, "winner": False},
+        {"name": "Delta", "number": 4, "team_id": 1, "winner": False},
+    ]
+
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={"postgame_available": True},
+    )
+
+    assert result["winning_team_id"] == 0
+    assert result["winning_player_names"] == ["Alpha", "Bravo"]
+    assert result["result_trusted"] is True
+    assert (
+        result["result_provenance"]
+        == "postgame_single_team_winner_flags"
+    )
+
+
+def test_single_team_partial_winner_flags_without_decisive_completion_stay_review_only():
+    players = [
+        {"name": "Alpha", "number": 1, "team_id": 0, "winner": True},
+        {"name": "Bravo", "number": 2, "team_id": 0, "winner": None},
+        {"name": "Charlie", "number": 3, "team_id": 1, "winner": False},
+        {"name": "Delta", "number": 4, "team_id": 1, "winner": False},
+    ]
+
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={},
+    )
+
+    assert result["winning_team_id"] is None
+    assert result["result_trusted"] is False
+    assert (
+        result["result_provenance"]
+        == "single_team_player_winner_flags_review"
+    )
+
+
+def test_winner_flags_on_both_teams_remain_review_only_even_with_postgame():
+    players = [
+        {"name": "Alpha", "number": 1, "team_id": 0, "winner": True},
+        {"name": "Bravo", "number": 2, "team_id": 0, "winner": None},
+        {"name": "Charlie", "number": 3, "team_id": 1, "winner": True},
+        {"name": "Delta", "number": 4, "team_id": 1, "winner": False},
+    ]
+
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        key_events={"postgame_available": True},
+    )
+
+    assert result["winning_team_id"] is None
+    assert result["result_trusted"] is False

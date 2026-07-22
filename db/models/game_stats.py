@@ -67,7 +67,7 @@ class GameStats(Base):
 
     def to_dict(self):
         logger = getLogger(__name__)
-        trace_enabled = os.getenv("ENABLE_TRACE_LOGS", "true").lower() == "true"
+        trace_enabled = os.getenv("ENABLE_TRACE_LOGS", "false").lower() == "true"
         derived_played_on = self._filename_played_on()
         played_at = self.played_on or derived_played_on or self.created_at or self.timestamp
 

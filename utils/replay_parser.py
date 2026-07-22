@@ -23,7 +23,7 @@ from utils.replay_engine import (
     capture_summary_evidence,
     normalize_failure_signature,
 )
-from utils.replay_team_contract import apply_replay_team_contract
+from utils.replay_team_contract import apply_replay_team_contract, resolve_replay_teams
 
 
 MGZ_HD_TYPE9_GAME_TYPE_LABEL = "TurboRandom9"
@@ -2099,6 +2099,139 @@ def _safe_match_team_id(team_id):
         return None
 
 
+def _team_recovery_name(value):
+    return str(value or "").strip().casefold()
+
+
+def _needs_team_id_recovery(stats, *, final):
+    if not isinstance(stats, dict):
+        return False
+
+    players = stats.get("players")
+    if not isinstance(players, list) or len(players) not in {4, 6, 8}:
+        return False
+
+    resolution = resolve_replay_teams(
+        players,
+        final=final,
+        key_events=stats.get("key_events"),
+    )
+
+    return not (
+        resolution.get("status") == "resolved"
+        and resolution.get("confidence") == "high"
+        and len(resolution.get("teams") or []) == 2
+    )
+
+
+def _merge_resolved_team_ids(
+    target_stats,
+    source_stats,
+    *,
+    source_label,
+    final,
+):
+    if not isinstance(target_stats, dict) or not isinstance(source_stats, dict):
+        return False
+
+    target_players = target_stats.get("players")
+    source_players = source_stats.get("players")
+
+    if not isinstance(target_players, list) or not isinstance(source_players, list):
+        return False
+
+    if (
+        len(target_players) != len(source_players)
+        or len(target_players) not in {4, 6, 8}
+    ):
+        return False
+
+    source_resolution = resolve_replay_teams(
+        source_players,
+        final=final,
+        key_events=source_stats.get("key_events"),
+    )
+
+    # Absolutely no FFA / unequal / ambiguous conversion into a market.
+    if not (
+        source_resolution.get("status") == "resolved"
+        and source_resolution.get("confidence") == "high"
+        and len(source_resolution.get("teams") or []) == 2
+    ):
+        return False
+
+    source_by_name = {}
+
+    for player in source_players:
+        if not isinstance(player, dict):
+            return False
+
+        name_key = _team_recovery_name(player.get("name"))
+        team_id = player.get("team_id")
+
+        if (
+            not name_key
+            or team_id is None
+            or name_key in source_by_name
+        ):
+            return False
+
+        source_by_name[name_key] = team_id
+
+    proposed = []
+
+    for player in target_players:
+        if not isinstance(player, dict):
+            return False
+
+        name_key = _team_recovery_name(player.get("name"))
+
+        if not name_key or name_key not in source_by_name:
+            return False
+
+        recovered_team_id = source_by_name[name_key]
+        current_team_id = player.get("team_id")
+
+        if (
+            current_team_id is not None
+            and str(current_team_id) != str(recovered_team_id)
+        ):
+            return False
+
+        proposed.append((player, recovered_team_id))
+
+    for player, recovered_team_id in proposed:
+        player["team_id"] = recovered_team_id
+        player["team_id_source"] = source_label
+
+    target_resolution = resolve_replay_teams(
+        target_players,
+        final=final,
+        key_events=target_stats.get("key_events"),
+    )
+
+    if not (
+        target_resolution.get("status") == "resolved"
+        and target_resolution.get("confidence") == "high"
+        and len(target_resolution.get("teams") or []) == 2
+    ):
+        return False
+
+    target_events = target_stats.setdefault("key_events", {})
+    source_events = source_stats.get("key_events")
+
+    if isinstance(target_events, dict) and isinstance(source_events, dict):
+        if source_events.get("diplomacy"):
+            target_events["diplomacy"] = source_events["diplomacy"]
+
+        if source_events.get("team_source"):
+            target_events["team_source"] = source_events["team_source"]
+
+        target_events["team_id_recovery_source"] = source_label
+
+    return True
+
+
 def _parse_match_live_fallback_bytes(
     replay_path,
     file_bytes,
@@ -2298,6 +2431,7 @@ def _parse_sync_bytes_with_diagnostics(
 
         players = []
         winner = None
+        header_diplomacy = None
         raw_players = list(s.get_players())
         achievement_shell_count = 0
         for p in raw_players:
@@ -2342,6 +2476,12 @@ def _parse_sync_bytes_with_diagnostics(
             if p_data["winner"]:
                 winner = p_data["name"]
 
+        if (
+            len(players) in {4, 6, 8}
+            and any(player.get("team_id") is None for player in players)
+        ):
+            header_diplomacy = _fragment_diplomacy_groups(h, players)
+
         owner_player_name = next(
             (
                 player.get("name")
@@ -2384,6 +2524,10 @@ def _parse_sync_bytes_with_diagnostics(
             "raw_duration_ms": int(raw_duration_ms) if isinstance(raw_duration_ms, (int, float)) else None,
             "duration_source": "mgz_summary_ms_normalized",
         }
+        if header_diplomacy:
+            stats["key_events"]["team_source"] = header_diplomacy["source"]
+            stats["key_events"]["diplomacy"] = header_diplomacy
+
         if settings_summary:
             stats["key_events"]["settings"] = settings_summary
         if platform_ratings:
@@ -2432,11 +2576,68 @@ def _parse_sync_bytes_with_diagnostics(
             e,
             capture_engine_evidence=capture_engine_evidence,
         )
+
         if live_fallback:
+            if _needs_team_id_recovery(
+                live_fallback,
+                final=apply_hd_early_exit_rules,
+            ):
+                team_recovery_candidates = [
+                    (
+                        "hd_lobby_team_array",
+                        _parse_hd_trailing_header_body_bytes(
+                            replay_path,
+                            file_bytes,
+                            e,
+                            capture_engine_evidence=False,
+                            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+                        ),
+                    ),
+                    (
+                        "header_initial_mutual_diplomacy",
+                        _parse_hd_fragment_header_body_bytes(
+                            replay_path,
+                            file_bytes,
+                            e,
+                            capture_engine_evidence=False,
+                            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+                        ),
+                    ),
+                    (
+                        "hd_metadata_fragment",
+                        _parse_hd_metadata_fragment_body_bytes(
+                            replay_path,
+                            file_bytes,
+                            e,
+                            capture_engine_evidence=False,
+                            apply_hd_early_exit_rules=apply_hd_early_exit_rules,
+                        ),
+                    ),
+                ]
+
+                for source_label, candidate in team_recovery_candidates:
+                    if _merge_resolved_team_ids(
+                        live_fallback,
+                        candidate,
+                        source_label=source_label,
+                        final=apply_hd_early_exit_rules,
+                    ):
+                        logging.warning(
+                            "⚠️ recovered exact two-team IDs for %s via %s",
+                            replay_path,
+                            source_label,
+                        )
+                        break
+
             if apply_hd_early_exit_rules:
                 live_fallback["parse_reason"] = "hd_final_parse_match_fallback"
-                live_fallback.setdefault("key_events", {})["parse_match_final_fallback"] = True
+                live_fallback.setdefault(
+                    "key_events",
+                    {},
+                )["parse_match_final_fallback"] = True
+
             return live_fallback, diagnostic, "mgz_parse_match_fallback"
+
         trailing_header_fallback = _parse_hd_trailing_header_body_bytes(
             replay_path,
             file_bytes,

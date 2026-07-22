@@ -129,6 +129,7 @@ def _result_resolution(
     players: list[dict],
     teams: list[dict],
     winner_flag_team_id: Any,
+    single_team_winner_flag_team_id: Any,
     key_events: Any,
 ) -> dict:
     """Describe result truth separately from lobby/team truth.
@@ -194,10 +195,15 @@ def _result_resolution(
             None,
         )
 
+    winner_evidence_team_id = (
+        winner_flag_team_id
+        if winner_flag_team_id is not None
+        else single_team_winner_flag_team_id
+    )
     resignation_result_conflict = bool(
         resignation_derived_winning_team_id is not None
-        and winner_flag_team_id is not None
-        and resignation_derived_winning_team_id != winner_flag_team_id
+        and winner_evidence_team_id is not None
+        and resignation_derived_winning_team_id != winner_evidence_team_id
     )
     complete_losing_team_resignation = bool(
         resignation_derived_winning_team_id is not None
@@ -211,6 +217,7 @@ def _result_resolution(
         or _integer(events.get("achievement_player_count"))
     )
     winner_flags_coherent = winner_flag_team_id is not None
+    winner_flags_single_team = single_team_winner_flag_team_id is not None
 
     sources: list[str] = []
     if postgame_available:
@@ -221,6 +228,8 @@ def _result_resolution(
         sources.append("complete_losing_team_resignation")
     if winner_flags_coherent:
         sources.append("coherent_player_winner_flags")
+    elif winner_flags_single_team:
+        sources.append("single_team_player_winner_flags")
 
     winning_team_id = None
     if resignation_result_conflict or len(fully_resigned_team_ids) > 1:
@@ -228,14 +237,26 @@ def _result_resolution(
     elif complete_losing_team_resignation:
         winning_team_id = resignation_derived_winning_team_id
         provenance = "complete_losing_team_resignation"
-    elif postgame_available and winner_flags_coherent:
-        winning_team_id = winner_flag_team_id
-        provenance = "postgame_winner_flags"
-    elif scoreboard_available and winner_flags_coherent:
-        winning_team_id = winner_flag_team_id
-        provenance = "scoreboard_winner_flags"
-    elif winner_flags_coherent:
-        provenance = "coherent_player_winner_flags_review"
+    elif postgame_available and winner_evidence_team_id is not None:
+        winning_team_id = winner_evidence_team_id
+        provenance = (
+            "postgame_winner_flags"
+            if winner_flags_coherent
+            else "postgame_single_team_winner_flags"
+        )
+    elif scoreboard_available and winner_evidence_team_id is not None:
+        winning_team_id = winner_evidence_team_id
+        provenance = (
+            "scoreboard_winner_flags"
+            if winner_flags_coherent
+            else "scoreboard_single_team_winner_flags"
+        )
+    elif winner_evidence_team_id is not None:
+        provenance = (
+            "coherent_player_winner_flags_review"
+            if winner_flags_coherent
+            else "single_team_player_winner_flags_review"
+        )
     else:
         provenance = "insufficient_result_evidence"
 
@@ -264,7 +285,9 @@ def _result_resolution(
         "result_evidence": {
             "sources": sources,
             "winner_flags_coherent": winner_flags_coherent,
+            "winner_flags_single_team": winner_flags_single_team,
             "winner_flag_team_id": winner_flag_team_id,
+            "single_team_winner_flag_team_id": single_team_winner_flag_team_id,
             "postgame_available": postgame_available,
             "scoreboard_available": scoreboard_available,
             "complete_losing_team_resignation": complete_losing_team_resignation,
@@ -354,22 +377,49 @@ def resolve_replay_teams(
             provenance = "explicit_final_team_ids" if final else "explicit_replay_team_ids"
 
     winner_flag_team_id = None
+    single_team_winner_flag_team_id = None
     if status == "resolved":
         winning_indexes = []
         losing_indexes = []
+        true_flag_indexes = []
         player_by_key = {_stable_player_key(player): player for player in players}
+
         for index, team in enumerate(teams):
-            flags = [player_by_key[key].get("winner") for key in team["player_keys"]]
+            flags = [
+                player_by_key[key].get("winner")
+                for key in team["player_keys"]
+            ]
+
             if flags and all(flag is True for flag in flags):
                 winning_indexes.append(index)
+
             if flags and all(flag is False for flag in flags):
                 losing_indexes.append(index)
+
+            if any(flag is True for flag in flags):
+                true_flag_indexes.append(index)
+
         if (
             len(winning_indexes) == 1
             and len(losing_indexes) == 1
             and winning_indexes[0] != losing_indexes[0]
         ):
             winner_flag_team_id = teams[winning_indexes[0]]["team_id"]
+
+        elif len(true_flag_indexes) == 1:
+            candidate_index = true_flag_indexes[0]
+            candidate_flags = [
+                player_by_key[key].get("winner")
+                for key in teams[candidate_index]["player_keys"]
+            ]
+
+            # Never override an explicit loser flag on the candidate team.
+            # This remains weaker evidence and is trusted only alongside
+            # decisive postgame/scoreboard proof.
+            if all(flag is not False for flag in candidate_flags):
+                single_team_winner_flag_team_id = (
+                    teams[candidate_index]["team_id"]
+                )
 
     result = {
         "status": status,
@@ -383,7 +433,13 @@ def resolve_replay_teams(
         "winning_team_id": None,
     }
     result.update(
-        _result_resolution(players, teams, winner_flag_team_id, key_events)
+        _result_resolution(
+            players,
+            teams,
+            winner_flag_team_id,
+            single_team_winner_flag_team_id,
+            key_events,
+        )
     )
     return result
 

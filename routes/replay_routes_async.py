@@ -903,6 +903,54 @@ def _event_type_count(value) -> int:
     return 0
 
 
+
+def _has_trusted_resolved_result(key_events: dict) -> bool:
+    """Return whether replay evidence contains a decisive trusted result.
+
+    A later replay observation that acquires trusted structured result truth
+    is strictly richer than an unresolved/review-only observation, even when
+    duration, action count, postgame availability, and score coverage are
+    otherwise unchanged.
+    """
+    if not isinstance(key_events, dict):
+        return False
+
+    for field in ("result_resolution", "team_resolution"):
+        resolution = key_events.get(field)
+
+        if not isinstance(resolution, dict):
+            continue
+
+        if resolution.get("result_status") != "resolved":
+            continue
+
+        if resolution.get("result_trusted") is not True:
+            continue
+
+        winning_team_id = resolution.get("winning_team_id")
+        winning_player_keys = resolution.get("winning_player_keys")
+        winning_player_names = resolution.get("winning_player_names")
+
+        has_winning_keys = (
+            isinstance(winning_player_keys, list)
+            and any(str(value or "").strip() for value in winning_player_keys)
+        )
+
+        has_winning_names = (
+            isinstance(winning_player_names, list)
+            and any(str(value or "").strip() for value in winning_player_names)
+        )
+
+        if (
+            winning_team_id is not None
+            or has_winning_keys
+            or has_winning_names
+        ):
+            return True
+
+    return False
+
+
 def _should_upgrade_duplicate_final(
     existing_game,
     incoming_parse_reason: Optional[str],
@@ -911,6 +959,12 @@ def _should_upgrade_duplicate_final(
 ):
     existing_key_events = getattr(existing_game, "key_events", {}) or {}
     existing_parse_reason = getattr(existing_game, "parse_reason", None)
+
+    if (
+        _has_trusted_resolved_result(incoming_key_events)
+        and not _has_trusted_resolved_result(existing_key_events)
+    ):
+        return True
 
     if existing_parse_reason == UNPARSED_FINAL_PARSE_REASON and incoming_parse_reason != existing_parse_reason:
         return True
@@ -991,6 +1045,13 @@ def _should_refresh_reviewed_match(
     existing_key_events = getattr(existing_game, "key_events", {}) or {}
     existing_duration = _coerce_positive_int(getattr(existing_game, "duration", 0))
     incoming_duration = _coerce_positive_int(incoming_duration)
+
+    if (
+        _has_trusted_resolved_result(incoming_key_events)
+        and not _has_trusted_resolved_result(existing_key_events)
+    ):
+        return True
+
     if _key_event_bool(incoming_key_events, "postgame_available") and not _key_event_bool(
         existing_key_events, "postgame_available"
     ):
