@@ -8,6 +8,7 @@ from utils.replay_parser import (
     _apply_hd_early_exit_rules,
     _maybe_apply_hd_early_exit_rules,
     _normalize_mgz_duration_seconds,
+    _summary_player_score,
 )
 
 
@@ -15,6 +16,12 @@ def test_normalize_mgz_duration_seconds_converts_millis_to_seconds():
     assert _normalize_mgz_duration_seconds(480) == 1
     assert _normalize_mgz_duration_seconds(6007) == 7
     assert _normalize_mgz_duration_seconds(26460) == 27
+
+
+def test_summary_player_score_preserves_missing_versus_exact_zero():
+    assert _summary_player_score({"name": "No scoreboard"}) is None
+    assert _summary_player_score({"name": "Missing", "score": None}) is None
+    assert _summary_player_score({"name": "Exact zero", "score": 0}) == 0
 
 
 def test_apply_hd_early_exit_rules_suppresses_under_60s_rated_result():

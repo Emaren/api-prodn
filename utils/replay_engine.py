@@ -29,10 +29,10 @@ from mgz.reference import get_consts
 
 
 PARSER_CONTRACT_VERSION = "1.1"
-PARSER_SCHEMA_VERSION = "2026-07-24.1"
+PARSER_SCHEMA_VERSION = "2026-07-25.1"
 PARSER_IMPLEMENTATION = "aoe2war.mgz_hd"
 PARSER_PASS_NAME = "hd_deterministic_evidence"
-PARSER_PASS_VERSION = "7"
+PARSER_PASS_VERSION = "8"
 MAX_COMPACT_RECEIPT_JSON_BYTES = 32 * 1024
 MAX_FRAGMENT_BODY_OPERATIONS = 2_000_000
 
@@ -1286,6 +1286,16 @@ def build_observations(
     key_events = projection.get("key_events") if isinstance(projection.get("key_events"), dict) else {}
     map_snapshot = evidence.get("map_snapshot") if isinstance(evidence.get("map_snapshot"), dict) else {}
     postgame_available = bool(key_events.get("postgame_available"))
+    achievement_evidence_available = bool(
+        postgame_available
+        or key_events.get("has_achievements")
+        or _integer(key_events.get("achievement_player_count"))
+    )
+    score_evidence_available = bool(
+        postgame_available
+        or key_events.get("has_scores")
+        or _integer(key_events.get("player_score_count"))
+    )
 
     def add(field: str, value: Any, provenance: str, source: str, **kwargs: Any) -> None:
         observations.append(_observation(field, value, provenance, source, **kwargs))
@@ -1386,6 +1396,8 @@ def build_observations(
             value: Any = achievements
             for part in postgame_field.split("."):
                 value = value.get(part) if isinstance(value, dict) else None
+            if not achievement_evidence_available:
+                value = None
             add(
                 f"player.postgame.{postgame_field}",
                 value,
@@ -1394,7 +1406,11 @@ def build_observations(
                 subject=subject,
                 exact=value is not None,
             )
-        score = player.get("score")
+        score = (
+            player.get("score")
+            if score_evidence_available
+            else None
+        )
         add(
             "player.postgame.score",
             score,
@@ -1456,6 +1472,161 @@ def build_observations(
         "aoe2war.experimental_exact_packet_identity_normalization",
         exact=False,
     )
+
+    projection_players = [
+        player
+        for player in (
+            projection.get("players")
+            if isinstance(projection.get("players"), list)
+            else []
+        )
+        if isinstance(player, dict)
+    ]
+    subjects_by_number = {
+        number: _player_subject(player)
+        for player in projection_players
+        if (number := _integer(player.get("number"))) is not None
+    }
+    subjects_by_name = {
+        name.casefold(): _player_subject(player)
+        for player in projection_players
+        if (name := _clean_text(player.get("name")))
+    }
+
+    def action_player_subject(row: dict[str, Any]) -> dict[str, Any]:
+        number = _integer(row.get("player_number"))
+        name = _clean_text(row.get("player_name"))
+        if number is not None and number in subjects_by_number:
+            return subjects_by_number[number]
+        if name and name.casefold() in subjects_by_name:
+            return subjects_by_name[name.casefold()]
+        return _player_subject(
+            {
+                "number": number,
+                "name": name,
+            }
+        )
+
+    action_metric_fields = {
+        "action_packet_count": "recorded_packet_count",
+        "action_type_counts": "recorded_type_counts",
+        "command_family_counts": "recorded_command_family_counts",
+        "first_action_ms": "first_recorded_command_ms",
+        "last_action_ms": "last_recorded_command_ms",
+        "active_minute_count": "active_recorded_minute_count",
+        "peak_actions_in_one_minute": "peak_recorded_packets_in_minute",
+        "largest_recorded_action_gap_ms": "largest_recorded_command_gap_ms",
+    }
+    for activity in (
+        actions.get("raw_activity_by_player", [])
+        if actions_available
+        else []
+    ):
+        if not isinstance(activity, dict):
+            continue
+        subject = action_player_subject(activity)
+        for source_field, metric_field in action_metric_fields.items():
+            value = activity.get(source_field)
+            add(
+                f"player.actions.{metric_field}",
+                value,
+                PROVENANCE_DERIVED if value is not None else PROVENANCE_ABSENT,
+                f"aoe2war.raw_recorded_action_activity.{source_field}",
+                subject=subject,
+                exact=value is not None,
+            )
+        add(
+            "player.actions.recorded_packet_rate_per_minute",
+            activity.get("eapm"),
+            PROVENANCE_DERIVED,
+            "aoe2war.raw_recorded_action_activity.eapm",
+            subject=subject,
+            exact=False,
+        )
+
+    def add_player_timeline_count(
+        field: str,
+        rows: list[Any],
+        evidence_source: str,
+        *,
+        exact: bool,
+    ) -> None:
+        counts: Counter[tuple[int | None, str | None]] = Counter(
+            {
+                (
+                    _integer(player.get("number")),
+                    _clean_text(player.get("name")),
+                ): 0
+                for player in projection_players
+            }
+        )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            counts[
+                (
+                    _integer(row.get("player_number")),
+                    _clean_text(row.get("player_name")),
+                )
+            ] += 1
+        for (number, name), count in sorted(
+            counts.items(),
+            key=lambda item: (
+                item[0][0] is None,
+                item[0][0] or 0,
+                (item[0][1] or "").casefold(),
+            ),
+        ):
+            add(
+                field,
+                count,
+                PROVENANCE_DERIVED,
+                evidence_source,
+                subject=action_player_subject(
+                    {
+                        "player_number": number,
+                        "player_name": name,
+                    }
+                ),
+                exact=exact,
+            )
+
+    if actions_available:
+        add_player_timeline_count(
+            "player.actions.age_up_research_command_count",
+            actions.get("age_up_research_commands", []),
+            "aoe2war.recorded_age_up_research_commands",
+            exact=True,
+        )
+        add_player_timeline_count(
+            "player.actions.market_command_count",
+            actions.get("market_commands", []),
+            "aoe2war.recorded_market_commands",
+            exact=True,
+        )
+        add_player_timeline_count(
+            "player.actions.tribute_command_count",
+            actions.get("tribute_commands", []),
+            "aoe2war.recorded_tribute_commands",
+            exact=True,
+        )
+
+    for resignation in (
+        actions.get("resignation_timeline", [])
+        if actions_available
+        else []
+    ):
+        if not isinstance(resignation, dict):
+            continue
+        add(
+            "player.actions.first_resignation_ms",
+            resignation.get("timestamp_ms"),
+            PROVENANCE_DERIVED,
+            "aoe2war.earliest_resignation_per_player",
+            subject=action_player_subject(resignation),
+            exact=False,
+        )
+
     add(
         "actions.raw_resignation_timeline",
         actions.get("raw_resignation_timeline", []) if actions_available else None,
@@ -1617,6 +1788,7 @@ def compact_candidate_receipt(candidate: dict[str, Any]) -> dict[str, Any]:
         "promotion_status": candidate_state.get("promotion_status"),
         "changes_effective_truth": False,
         "observation_count": len(candidate.get("observations") or []),
+        "action_stream_available": actions_available,
         "raw_action_count": actions.get("count"),
         "unique_action_identity_count": actions.get("unique_action_identity_count"),
         "exact_duplicate_packet_excess": actions.get("exact_duplicate_packet_excess"),
@@ -1735,6 +1907,7 @@ def compact_candidate_receipt(candidate: dict[str, Any]) -> dict[str, Any]:
                 else None
             ),
         }
+        receipt["action_stream_available"] = actions_available
         receipt["action_type_counts"] = {}
         receipt["receipt_truncated"] = True
 

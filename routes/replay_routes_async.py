@@ -473,6 +473,151 @@ def _statistics_complete(
     )
 
 
+def _has_meaningful_statistics_value(
+    value: object,
+) -> bool:
+    if value is None:
+        return False
+
+    if isinstance(value, bool):
+        return True
+
+    if isinstance(value, (int, float)):
+        return True
+
+    if isinstance(value, str):
+        return bool(value.strip())
+
+    if isinstance(value, dict):
+        return any(
+            _has_meaningful_statistics_value(
+                item
+            )
+            for item in value.values()
+        )
+
+    if isinstance(value, (list, tuple)):
+        return any(
+            _has_meaningful_statistics_value(
+                item
+            )
+            for item in value
+        )
+
+    return False
+
+
+def _statistics_available(
+    payload: dict,
+) -> bool:
+    if bool(
+        payload.get("statistics_complete")
+        or payload.get("statistics_available")
+    ):
+        return True
+
+    key_events = payload.get("key_events")
+    if not isinstance(key_events, dict):
+        return False
+
+    def positive_count(field: str) -> int:
+        try:
+            return max(
+                0,
+                int(
+                    key_events.get(field)
+                    or 0
+                ),
+            )
+        except (TypeError, ValueError):
+            return 0
+
+    achievement_count = positive_count(
+        "achievement_player_count"
+    )
+    score_count = positive_count(
+        "player_score_count"
+    )
+    postgame_available = bool(
+        key_events.get(
+            "postgame_available"
+        )
+    )
+    achievement_evidence = bool(
+        postgame_available
+        or key_events.get(
+            "has_achievements"
+        )
+        or achievement_count > 0
+    )
+    score_evidence = bool(
+        postgame_available
+        or key_events.get(
+            "has_scores"
+        )
+        or score_count > 0
+    )
+
+    if (
+        achievement_count > 0
+        or score_count > 0
+    ):
+        return True
+
+    players = payload.get("players")
+    if isinstance(players, list):
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+
+            if (
+                score_evidence
+                and _has_meaningful_statistics_value(
+                    player.get("score")
+                )
+            ):
+                return True
+
+            if (
+                achievement_evidence
+                and _has_meaningful_statistics_value(
+                    player.get(
+                        "achievements"
+                    )
+                )
+            ):
+                return True
+
+    parser_engine = key_events.get(
+        "parser_engine"
+    )
+    if not isinstance(parser_engine, dict):
+        return False
+
+    if (
+        parser_engine.get(
+            "action_stream_available"
+        )
+        is not True
+    ):
+        return False
+
+    raw_action_count = parser_engine.get(
+        "raw_action_count"
+    )
+    return bool(
+        isinstance(
+            raw_action_count,
+            (int, float),
+        )
+        and not isinstance(
+            raw_action_count,
+            bool,
+        )
+        and raw_action_count >= 0
+    )
+
+
 def _finality_response(
     payload: dict,
     *,
@@ -530,9 +675,16 @@ def _finality_response(
         and has_reliable_teams
         and has_coherent_winning_team
     )
-    stats_eligible = bool(is_final and result_resolved)
-    final_accepted = betting_eligible
     parse_completed = not bool(pending_parse or unparsed_final)
+    statistics_available = _statistics_available(
+        payload
+    )
+    stats_eligible = bool(
+        is_final
+        and parse_completed
+        and statistics_available
+    )
+    final_accepted = betting_eligible
     artifact_archived = bool(raw_replay_archived)
     artifact_accepted = artifact_archived
     if finality_status == FINALITY_FINAL_UNPARSED_PROOF:
@@ -603,6 +755,7 @@ def _finality_response(
                 "statistics_complete"
             )
         ),
+        "statistics_available": statistics_available,
         "recovery_queued": bool(
             payload.get(
                 "recovery_queued"

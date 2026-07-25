@@ -25,6 +25,7 @@ Production FastAPI backend for AoE2HDBets.
 ## Canonical docs
 
 - [TESTING.md](/Users/tonyblum/projects/AoE2HDBets/api-prodn/TESTING.md)
+- [docs/REPLAY_ENGINE_ROOM_WORKER.md](/Users/tonyblum/projects/AoE2HDBets/api-prodn/docs/REPLAY_ENGINE_ROOM_WORKER.md)
 
 ## Responsibilities
 
@@ -157,6 +158,14 @@ public truth. After a run, `scripts/report_replay_engine_room_job.py` verifies
 the stored candidate bytes again and writes the private per-game reconciliation
 equation. See `docs/REPLAY_ENGINE_ROOM_WORKER.md` for the production runbook.
 
+The canonical HD parser contract is now `aoe2war.mgz_hd` / `mgz 1.8.51`,
+schema `2026-07-25.1`, pass `hd_deterministic_evidence` version `8`. Pass 8
+emits queryable per-player recorded-action observations for packet/type/command
+counts, first/last command time, active minutes, peak activity, largest gap, and
+age-up/market/tribute commands. A recorded zero remains zero; unavailable
+evidence is absent. These statistics do not imply that a result is resolved or
+that betting is eligible.
+
 ## Deployment model
 
 Local MBP -> push `main` -> VPS pull `main` -> restart service
@@ -191,6 +200,6 @@ python scripts/set_admin.py --email you@example.com --unset
 - replay/live/final behavior is much healthier than earlier, but still worth documenting carefully as it evolves
 - header-only replay fallback rows are useful proof breadcrumbs, not authoritative postgame result rows
 - `watcher_final_unparsed` rows are proof rows only; they should be upgraded by a later parse/re-upload, not treated as authoritative result rows
-- exact postgame achievement-table extraction is still not part of the replay pipeline
+- postgame achievement coverage varies by HD artifact/parser lane; consumers must preserve missing-as-unavailable and must not convert absent fields into zero
 - local trace output is expected while building if trace logging is enabled
 - `tests/test_fast.py` now skips replay fixtures that are absent from `tests/recs/`; restore DE/HD fixtures if you want that suite to become a hard gate again

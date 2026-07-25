@@ -20,6 +20,7 @@ from utils.replay_engine import (  # noqa: E402
     MAX_COMPACT_RECEIPT_JSON_BYTES,
     PROVENANCE_ABSENT,
     PROVENANCE_DIRECT_ACTION,
+    build_observations,
     build_candidate_envelope,
     canonical_candidate_json,
     compact_candidate_receipt,
@@ -245,8 +246,8 @@ def test_parser_pass_identity_is_explicit_and_idempotent():
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-24.1"
-    assert identity["pass_version"] == PARSER_PASS_VERSION == "7"
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-25.1"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "8"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 
@@ -828,6 +829,258 @@ def test_team_golden_keeps_complete_winner_and_direct_action_provenance(golden_c
         activity["command_family_counts"]["production_queue_command"] > 0
         for activity in candidate["actions"]["raw_activity_by_player"]
     )
+
+
+def test_candidate_emits_queryable_player_action_metrics(golden_candidates):
+    _manifest, candidates = golden_candidates
+    candidate = candidates["MP Replay v5.8 @2026.07.06 182842 (1).aoe2record"]
+    raw_activity = {
+        activity["player_number"]: activity
+        for activity in candidate["actions"]["raw_activity_by_player"]
+    }
+    observations = {
+        (
+            observation["field"],
+            observation["subject"].get("player_number"),
+        ): observation
+        for observation in candidate["observations"]
+        if observation["subject"].get("type") == "player"
+    }
+
+    for player in candidate["projection"]["players"]:
+        player_number = player["number"]
+        activity = raw_activity[player_number]
+        packet_count = observations[
+            ("player.actions.recorded_packet_count", player_number)
+        ]
+        packet_rate = observations[
+            ("player.actions.recorded_packet_rate_per_minute", player_number)
+        ]
+
+        assert packet_count["value"] == activity["action_packet_count"]
+        assert packet_count["exact"] is True
+        assert packet_rate["value"] == activity["eapm"]
+        assert packet_rate["exact"] is False
+
+        for field in (
+            "player.actions.age_up_research_command_count",
+            "player.actions.market_command_count",
+            "player.actions.tribute_command_count",
+        ):
+            command_count = observations[(field, player_number)]
+            assert isinstance(command_count["value"], int)
+            assert command_count["value"] >= 0
+            assert command_count["exact"] is True
+
+    resigned_numbers = {
+        event["player_number"]
+        for event in candidate["actions"]["resignation_timeline"]
+    }
+    resignation_observations = {
+        player_number
+        for (field, player_number), observation in observations.items()
+        if field == "player.actions.first_resignation_ms"
+        and observation["value"] is not None
+    }
+    assert resignation_observations == resigned_numbers
+
+
+def test_player_action_metric_observations_preserve_zero_and_provenance():
+    projection = {
+        "players": [
+            {"name": "Alpha", "number": 1, "steam_id": "1001"},
+            {"name": "Bravo", "number": 2, "steam_id": "1002"},
+        ],
+        "key_events": {},
+    }
+    evidence = {
+        "actions": {
+            "available": True,
+            "count": 3,
+            "raw_activity_by_player": [
+                {
+                    "player_number": 1,
+                    "player_name": "Alpha",
+                    "action_packet_count": 3,
+                    "action_type_counts": {"build": 3},
+                    "command_family_counts": {"construction_command": 3},
+                    "first_action_ms": 1000,
+                    "last_action_ms": 3000,
+                    "active_minute_count": 1,
+                    "peak_actions_in_one_minute": 3,
+                    "largest_recorded_action_gap_ms": 1000,
+                    "eapm": 12,
+                }
+            ],
+            "age_up_research_commands": [
+                {
+                    "player_number": 1,
+                    "player_name": "Alpha",
+                }
+            ],
+            "market_commands": [],
+            "tribute_commands": [],
+            "resignation_timeline": [
+                {
+                    "player_number": 2,
+                    "player_name": "Bravo",
+                    "timestamp_ms": 4000,
+                }
+            ],
+        }
+    }
+
+    observations = build_observations(projection, evidence)
+    indexed = {
+        (
+            observation["field"],
+            observation["subject"].get("player_number"),
+        ): observation
+        for observation in observations
+        if observation["subject"].get("type") == "player"
+    }
+
+    assert indexed[
+        ("player.actions.recorded_packet_count", 1)
+    ]["value"] == 3
+    assert indexed[
+        ("player.actions.recorded_packet_rate_per_minute", 1)
+    ]["exact"] is False
+    assert indexed[
+        ("player.actions.age_up_research_command_count", 1)
+    ]["value"] == 1
+    assert indexed[
+        ("player.actions.age_up_research_command_count", 2)
+    ]["value"] == 0
+    assert indexed[
+        ("player.actions.market_command_count", 1)
+    ]["value"] == 0
+    assert indexed[
+        ("player.actions.tribute_command_count", 2)
+    ]["value"] == 0
+    assert indexed[
+        ("player.actions.first_resignation_ms", 2)
+    ]["value"] == 4000
+
+
+def test_unavailable_action_stream_does_not_invent_exact_zero_commands():
+    projection = {
+        "players": [
+            {"name": "Alpha", "number": 1, "steam_id": "1001"},
+            {"name": "Bravo", "number": 2, "steam_id": "1002"},
+        ],
+        "key_events": {},
+    }
+
+    observations = build_observations(
+        projection,
+        {"actions": {"available": False}},
+    )
+    command_fields = {
+        "player.actions.age_up_research_command_count",
+        "player.actions.market_command_count",
+        "player.actions.tribute_command_count",
+    }
+
+    assert not any(
+        observation["field"] in command_fields
+        for observation in observations
+    )
+
+
+def test_unavailable_postgame_does_not_invent_exact_zero_score_or_achievements():
+    projection = {
+        "players": [
+            {
+                "name": "Alpha",
+                "number": 1,
+                "score": 0,
+                "achievements": {
+                    "economy": {
+                        "stone_collected": 0,
+                    },
+                },
+            },
+            {
+                "name": "Bravo",
+                "number": 2,
+                "score": 0,
+                "achievements": {},
+            },
+        ],
+        "key_events": {
+            "postgame_available": False,
+            "has_scores": False,
+            "has_achievements": False,
+            "player_score_count": 0,
+            "achievement_player_count": 0,
+        },
+    }
+
+    observations = build_observations(
+        projection,
+        {"actions": {"available": False}},
+    )
+    postgame = [
+        observation
+        for observation in observations
+        if observation["field"].startswith("player.postgame.")
+    ]
+
+    assert postgame
+    assert all(observation["value"] is None for observation in postgame)
+    assert all(observation["exact"] is False for observation in postgame)
+    assert all(
+        observation["provenance_class"] == PROVENANCE_ABSENT
+        for observation in postgame
+    )
+
+
+def test_available_postgame_preserves_exact_numeric_zero():
+    projection = {
+        "players": [
+            {
+                "name": "Alpha",
+                "number": 1,
+                "score": 0,
+                "achievements": {
+                    "economy": {
+                        "stone_collected": 0,
+                    },
+                },
+            },
+            {"name": "Bravo", "number": 2, "score": 900},
+        ],
+        "key_events": {
+            "postgame_available": True,
+            "has_scores": True,
+            "has_achievements": True,
+            "player_score_count": 2,
+            "achievement_player_count": 1,
+        },
+    }
+
+    observations = build_observations(
+        projection,
+        {"actions": {"available": False}},
+    )
+    indexed = {
+        (
+            observation["field"],
+            observation["subject"].get("player_number"),
+        ): observation
+        for observation in observations
+        if observation["subject"].get("type") == "player"
+    }
+
+    assert indexed[("player.postgame.score", 1)]["value"] == 0
+    assert indexed[("player.postgame.score", 1)]["exact"] is True
+    assert indexed[
+        ("player.postgame.economy.stone_collected", 1)
+    ]["value"] == 0
+    assert indexed[
+        ("player.postgame.economy.stone_collected", 1)
+    ]["exact"] is True
 
 
 def test_jim_known_4v4_keeps_exact_teams_and_complete_winning_roster(golden_candidates):

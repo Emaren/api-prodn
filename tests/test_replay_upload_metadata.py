@@ -15,6 +15,7 @@ from routes.replay_routes_async import (
     _normalize_live_disconnect_detected,
     _parse_bool_header,
     _parse_positive_int_header,
+    _statistics_available,
     _should_upgrade_duplicate_final,
     _should_refresh_reviewed_match,
     _split_previous_version_supersession,
@@ -75,7 +76,7 @@ def test_finality_response_exposes_retry_and_completeness_contract():
     assert resolved_team_final["result_resolved"] is True
     assert resolved_team_final["result_trusted"] is True
     assert resolved_team_final["betting_eligible"] is True
-    assert resolved_team_final["stats_eligible"] is True
+    assert resolved_team_final["stats_eligible"] is False
     assert resolved_team_final["raw_replay_archived"] is True
     assert resolved_team_final["artifact_accepted"] is True
     assert resolved_team_final["final_artifact_accepted"] is True
@@ -110,6 +111,22 @@ def test_final_recorded_separates_archive_stats_and_betting_readiness():
                 "result_provenance": "coherent_player_winner_flags",
                 "result_evidence": {"sources": ["coherent_player_winner_flags"]},
             },
+            "key_events": {
+                "parser_engine": {
+                    "action_stream_available": True,
+                    "raw_action_count": 11,
+                },
+            },
+            "players": [
+                {
+                    "name": "Merik",
+                    "eapm": 11,
+                },
+                {
+                    "name": "Emaren",
+                    "eapm": 0,
+                },
+            ],
         },
         finality_status="final_recorded",
         should_settle=False,
@@ -154,6 +171,95 @@ def test_team_scalar_winner_never_bypasses_structured_result_contract():
     assert response["has_reliable_winner"] is False
     assert response["stats_eligible"] is False
     assert response["betting_eligible"] is False
+
+
+def test_unknown_result_can_still_be_eligible_for_exact_statistics():
+    response = _finality_response(
+        {
+            "is_final": True,
+            "players_count": 2,
+            "winner": "Unknown",
+            "key_events": {
+                "postgame_available": True,
+                "has_achievements": True,
+                "achievement_player_count": 1,
+            },
+            "players": [
+                {
+                    "name": "Alpha",
+                    "eapm": 14,
+                    "achievements": {
+                        "economy": {
+                            "stone_collected": 0,
+                        },
+                    },
+                },
+                {
+                    "name": "Bravo",
+                    "eapm": 9,
+                },
+            ],
+            "team_resolution": {
+                "status": "resolved",
+                "confidence": "high",
+                "team_count": 2,
+                "winning_team_id": None,
+                "winning_player_keys": [],
+                "result_status": "unresolved",
+                "result_trusted": False,
+            },
+        },
+        finality_status="final_recorded",
+        should_settle=False,
+        raw_replay_archived=True,
+    )
+
+    assert response["result_resolved"] is False
+    assert response["result_trusted"] is False
+    assert response["statistics_available"] is True
+    assert response["stats_eligible"] is True
+    assert response["betting_eligible"] is False
+    assert response["final_accepted"] is False
+
+
+def test_default_zero_score_and_diagnostic_eapm_are_not_statistics_evidence():
+    assert not _statistics_available(
+        {
+            "players": [
+                {"name": "Alpha", "score": 0, "eapm": 12},
+                {"name": "Bravo", "score": 0, "eapm": 0},
+            ],
+            "key_events": {
+                "postgame_available": False,
+                "has_scores": False,
+                "has_achievements": False,
+                "player_score_count": 0,
+                "achievement_player_count": 0,
+            },
+        }
+    )
+
+
+def test_exact_action_stream_zero_is_available_without_inventing_eapm():
+    assert _statistics_available(
+        {
+            "players": [
+                {"name": "Alpha", "score": 0},
+                {"name": "Bravo", "score": 0},
+            ],
+            "key_events": {
+                "postgame_available": False,
+                "has_scores": False,
+                "has_achievements": False,
+                "player_score_count": 0,
+                "achievement_player_count": 0,
+                "parser_engine": {
+                    "action_stream_available": True,
+                    "raw_action_count": 0,
+                },
+            },
+        }
+    )
 
 
 def test_parse_bool_header_understands_live_and_final_flags():

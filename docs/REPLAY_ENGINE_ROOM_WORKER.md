@@ -5,7 +5,7 @@ without changing current game truth. It is a private evidence lane: no
 `game_stats`, public aggregate, market, bet, or settlement row is written.
 
 The current canonical identity is `aoe2war.mgz_hd` / `mgz 1.8.51`, schema
-`2026-07-16.4`, pass `hd_deterministic_evidence` version `6`. The latest
+`2026-07-25.1`, pass `hd_deterministic_evidence` version `8`. The latest
 immutable disposition for the frozen 2,025-artifact campaign is 2,025 completed
 and zero failed. Historical failed runs are retained.
 
@@ -272,3 +272,69 @@ Campaign III recovery pass:
 - promotions/public mutation: zero;
 - post-job-8 frozen-cohort candidate frontier: 1,696 completed, 329 failed;
 - final Campaign III frozen-cohort frontier: 2,025 completed, 0 failed.
+
+## Pass 8 action-stat contract
+
+Pass 8 turns the already-normalized action stream into queryable per-player
+observations without changing result truth. When the action lane is available,
+it emits:
+
+- `player.actions.recorded_packet_count`
+- `player.actions.recorded_type_counts`
+- `player.actions.recorded_command_family_counts`
+- `player.actions.first_recorded_command_ms`
+- `player.actions.last_recorded_command_ms`
+- `player.actions.active_recorded_minute_count`
+- `player.actions.peak_recorded_packets_in_minute`
+- `player.actions.largest_recorded_command_gap_ms`
+- `player.actions.age_up_research_command_count`
+- `player.actions.market_command_count`
+- `player.actions.tribute_command_count`
+
+The count observations are exact for the recorded packet/evidence lane. A real
+count of `0` is emitted and must remain `0`; unavailable evidence is represented
+as absent/null provenance, never converted to zero. The derived
+`player.actions.recorded_packet_rate_per_minute` and
+`player.actions.first_resignation_ms` observations remain diagnostic rather
+than accepted exact career metrics.
+
+These observations may be statistically useful even when winner proof is
+missing. Parser completion, statistic eligibility, result eligibility, and
+betting eligibility are four separate facts. Pass 8 never changes a winner,
+opens or settles a market, creates a claim, or calls WoloChain.
+
+## Full-corpus staged runbook
+
+Do not point the worker at a live archive query. First reconcile the database
+and mounted archive into mode-`0600` reports and a frozen manifest:
+
+```bash
+cd /var/www/AoE2HDBets/api-prodn
+source .venv/bin/activate
+python scripts/reconcile_replay_corpus.py \
+  --archive-dir /mnt/HC_Volume_105319120/aoe2-replay-archive \
+  --report-dir /mnt/HC_Volume_105319120/aoe2-parser-engine/reports \
+  --snapshot-label <release-label>
+```
+
+Add `--verify-content-hashes` for the deliberate full-byte audit. It hashes the
+entire archive and may take materially longer; the candidate worker verifies
+every selected object again regardless.
+
+Then run the immutable manifest through these separate authority stages:
+
+1. `--mode plan`: read/hash/reconcile only; no database or candidate-object
+   writes.
+2. `--mode candidate`: append private artifacts, submissions, parse runs,
+   observations, job events, and mode-`0600` candidate objects. Start with
+   `--max-artifacts-this-run 25`; exit `75` is a safe resumable pause.
+3. Generate the reconciliation report and review candidate failures, identity
+   conflicts, result/financial links, and disk/WAL growth.
+4. Project normalized statistics in web-app `plan` mode, then `candidate` mode.
+   Neither mode affects public aggregates.
+5. Use normalized-stat `accept` only for the reviewed exact-stat cohort. This
+   may publish statistical facts, but it still has no result, betting,
+   settlement, claim, or chain authority.
+
+Never skip directly from a corpus inventory to accepted public statistics, and
+never treat a completed candidate job as winner or settlement proof.

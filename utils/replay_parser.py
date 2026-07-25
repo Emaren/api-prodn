@@ -607,6 +607,18 @@ def _count_players_with_visible_scores(players):
     return count
 
 
+def _summary_player_score(player):
+    if (
+        not isinstance(player, dict)
+        or "score" not in player
+    ):
+        return None
+
+    return _normalize_rating(
+        player.get("score")
+    )
+
+
 def _count_players_with_achievements(players):
     if not isinstance(players, list):
         return 0
@@ -2443,6 +2455,7 @@ def _parse_sync_bytes_with_diagnostics(
             rate_snapshot = _normalize_rating(p.get("rate_snapshot"))
             steam_id = player_ratings.get("steam_id") or _normalize_steam_id(p.get("user_id"))
             civilization = p.get("civilization", "Unknown")
+            score = _summary_player_score(p)
             raw_achievements = p.get("achievements") or {}
             if isinstance(raw_achievements, dict) and len(raw_achievements) > 0:
                 achievement_shell_count += 1
@@ -2453,7 +2466,6 @@ def _parse_sync_bytes_with_diagnostics(
                 "civilization": civilization,
                 "civilization_name": _normalize_civilization_name(civilization),
                 "winner": p.get("winner", False),
-                "score": p.get("score", 0),
                 "user_id": steam_id,
                 "steam_id": steam_id,
                 "steam_rm_rating": player_ratings.get("steam_rm_rating"),
@@ -2468,6 +2480,11 @@ def _parse_sync_bytes_with_diagnostics(
                 "mvp": p.get("mvp"),
                 "cheater": bool(p.get("cheater")) if p.get("cheater") is not None else None,
             }
+            if score is not None:
+                # Numeric zero is real only when the parser source supplied the
+                # score field. Missing score stays absent rather than becoming
+                # a manufactured scoreboard.
+                p_data["score"] = score
             if achievements:
                 p_data["achievements"] = achievements
             # HD rate_snapshot follows the visible DM-looking value, not the visible RM line.
