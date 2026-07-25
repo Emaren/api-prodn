@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from utils.replay_team_contract import (
     apply_replay_team_contract,
+    apply_replay_team_contract_pass7,
     canonicalize_replay_players,
     resolve_replay_teams,
 )
@@ -294,3 +295,389 @@ def test_winner_flags_on_both_teams_remain_review_only_even_with_postgame():
 
     assert result["winning_team_id"] is None
     assert result["result_trusted"] is False
+
+
+# AOE2WAR_HD_DETERMINISTIC_EVIDENCE_PASS7_TESTS
+def test_default_contract_still_rejects_uneven_teams():
+    players = [
+        {
+            "name": "Alpha",
+            "number": 1,
+            "team_id": 0,
+            "winner": None,
+        },
+        {
+            "name": "Bravo",
+            "number": 2,
+            "team_id": 0,
+            "winner": None,
+        },
+        {
+            "name": "Charlie",
+            "number": 3,
+            "team_id": 1,
+            "winner": None,
+        },
+        {
+            "name": "Delta",
+            "number": 4,
+            "team_id": 1,
+            "winner": None,
+        },
+        {
+            "name": "Echo",
+            "number": 5,
+            "team_id": 1,
+            "winner": None,
+        },
+    ]
+
+    result = resolve_replay_teams(
+        players,
+        final=True,
+    )
+
+    assert result["status"] == "unsupported"
+    assert result["teams"] == []
+    assert result["winning_team_id"] is None
+    assert result["result_trusted"] is False
+    assert (
+        "unsupported_team_format"
+        in result["reason_codes"]
+    )
+
+
+def test_pass7_preserves_exact_2v3_and_complete_losing_team():
+    players = [
+        {
+            "name": "Abrolle",
+            "number": 1,
+            "steam_id": "76561198219580097",
+            "team_id": 0,
+            "winner": None,
+        },
+        {
+            "name": "dawoody",
+            "number": 2,
+            "steam_id": "76561198244901362",
+            "team_id": 0,
+            "winner": None,
+        },
+        {
+            "name": "JeNaBeHT",
+            "number": 3,
+            "steam_id": "76561198840301008",
+            "team_id": 1,
+            "winner": None,
+        },
+        {
+            "name": "Jim",
+            "number": 4,
+            "steam_id": "76561198166409520",
+            "team_id": 1,
+            "winner": None,
+        },
+        {
+            "name": "Tenenti",
+            "number": 5,
+            "steam_id": "76561198259089048",
+            "team_id": 1,
+            "winner": None,
+        },
+    ]
+
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        allow_uneven_teams=True,
+        key_events={
+            "resigned_player_numbers": [
+                1,
+                2,
+                3,
+                4,
+            ],
+        },
+    )
+
+    assert result["status"] == "resolved"
+    assert result["format"] == "2v3"
+    assert result["team_count"] == 2
+    assert result["winning_team_id"] == 1
+    assert result["result_trusted"] is True
+
+    assert (
+        result["result_provenance"]
+        == "complete_losing_team_resignation"
+    )
+
+    assert set(
+        result["winning_player_keys"]
+    ) == {
+        "steam:76561198166409520",
+        "steam:76561198259089048",
+        "steam:76561198840301008",
+    }
+
+
+def test_pass7_partial_uneven_resignation_stays_review_only():
+    players = [
+        {
+            "name": "Alpha",
+            "number": 1,
+            "team_id": 0,
+            "winner": None,
+        },
+        {
+            "name": "Bravo",
+            "number": 2,
+            "team_id": 0,
+            "winner": None,
+        },
+        {
+            "name": "Charlie",
+            "number": 3,
+            "team_id": 1,
+            "winner": None,
+        },
+        {
+            "name": "Delta",
+            "number": 4,
+            "team_id": 1,
+            "winner": None,
+        },
+        {
+            "name": "Echo",
+            "number": 5,
+            "team_id": 1,
+            "winner": None,
+        },
+    ]
+
+    result = resolve_replay_teams(
+        players,
+        final=True,
+        allow_uneven_teams=True,
+        key_events={
+            "resigned_player_numbers": [
+                1,
+            ],
+        },
+    )
+
+    assert result["status"] == "resolved"
+    assert result["format"] == "2v3"
+    assert result["winning_team_id"] is None
+    assert result["result_trusted"] is False
+
+    assert result["result_evidence"][
+        "complete_losing_team_resignation"
+    ] is False
+
+
+def test_pass7_still_rejects_missing_and_three_team_structures():
+    missing = [
+        {
+            "name": "Alpha",
+            "number": 1,
+            "team_id": 0,
+        },
+        {
+            "name": "Bravo",
+            "number": 2,
+            "team_id": None,
+        },
+        {
+            "name": "Charlie",
+            "number": 3,
+            "team_id": 1,
+        },
+    ]
+
+    missing_result = resolve_replay_teams(
+        missing,
+        final=True,
+        allow_uneven_teams=True,
+    )
+
+    assert missing_result["status"] == "incomplete"
+    assert missing_result["teams"] == []
+    assert (
+        "team_id_missing"
+        in missing_result["reason_codes"]
+    )
+
+    three_teams = [
+        {
+            "name": "Alpha",
+            "number": 1,
+            "team_id": 0,
+        },
+        {
+            "name": "Bravo",
+            "number": 2,
+            "team_id": 1,
+        },
+        {
+            "name": "Charlie",
+            "number": 3,
+            "team_id": 2,
+        },
+    ]
+
+    three_team_result = resolve_replay_teams(
+        three_teams,
+        final=True,
+        allow_uneven_teams=True,
+    )
+
+    assert three_team_result["status"] == "unsupported"
+    assert three_team_result["teams"] == []
+
+    assert (
+        "unsupported_team_format"
+        in three_team_result["reason_codes"]
+    )
+
+
+def test_pass7_wrapper_is_explicitly_opt_in():
+    stats = apply_replay_team_contract_pass7(
+        {
+            "players": [
+                {
+                    "name": "Alpha",
+                    "number": 1,
+                    "team_id": 0,
+                },
+                {
+                    "name": "Bravo",
+                    "number": 2,
+                    "team_id": 0,
+                },
+                {
+                    "name": "Charlie",
+                    "number": 3,
+                    "team_id": 1,
+                },
+            ],
+            "completed": False,
+            "key_events": {},
+        },
+        final=True,
+    )
+
+    assert stats["team_resolution"]["status"] == "resolved"
+    assert stats["team_resolution"]["format"] == "2v1"
+    assert stats["team_resolution"]["result_trusted"] is False
+
+
+# AOE2WAR_PASS7_METADATA_FRAGMENT_AUTHORITY_GATE_TEST
+def test_pass7_metadata_fragment_does_not_gain_uneven_team_authority():
+    players = [
+        {
+            "name": "Alpha",
+            "number": 1,
+            "team_id": 0,
+            "metadata_fragment": True,
+        },
+        {
+            "name": "Bravo",
+            "number": 2,
+            "team_id": 0,
+            "metadata_fragment": True,
+        },
+        {
+            "name": "Charlie",
+            "number": 3,
+            "team_id": 0,
+            "metadata_fragment": True,
+        },
+        {
+            "name": "Delta",
+            "number": 4,
+            "team_id": 0,
+            "metadata_fragment": True,
+        },
+        {
+            "name": "Echo",
+            "number": 5,
+            "team_id": 1,
+            "metadata_fragment": True,
+        },
+        {
+            "name": "Foxtrot",
+            "number": 6,
+            "team_id": 1,
+            "metadata_fragment": True,
+        },
+    ]
+
+    stats = apply_replay_team_contract_pass7(
+        {
+            "players": players,
+            "completed": False,
+            "key_events": {
+                "header_metadata_fragment_recovery": True,
+                "header_fragment_boundary": (
+                    "after_hd_platform_metadata"
+                ),
+            },
+        },
+        final=True,
+    )
+
+    resolution = stats["team_resolution"]
+
+    assert resolution["status"] == "conflicting"
+    assert resolution["teams"] == []
+    assert resolution["result_trusted"] is False
+
+    assert (
+        "unequal_team_sizes"
+        in resolution["reason_codes"]
+    )
+
+
+def test_pass7_direct_uneven_team_authority_remains_available():
+    players = [
+        {
+            "name": "Alpha",
+            "number": 1,
+            "team_id": 0,
+        },
+        {
+            "name": "Bravo",
+            "number": 2,
+            "team_id": 0,
+        },
+        {
+            "name": "Charlie",
+            "number": 3,
+            "team_id": 1,
+        },
+        {
+            "name": "Delta",
+            "number": 4,
+            "team_id": 1,
+        },
+        {
+            "name": "Echo",
+            "number": 5,
+            "team_id": 1,
+        },
+    ]
+
+    stats = apply_replay_team_contract_pass7(
+        {
+            "players": players,
+            "completed": False,
+            "key_events": {},
+        },
+        final=True,
+    )
+
+    resolution = stats["team_resolution"]
+
+    assert resolution["status"] == "resolved"
+    assert resolution["format"] == "2v3"
+    assert resolution["result_trusted"] is False

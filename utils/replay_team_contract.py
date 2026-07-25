@@ -309,6 +309,7 @@ def resolve_replay_teams(
     *,
     final: bool = False,
     key_events: Any = None,
+    allow_uneven_teams: bool = False,
 ) -> dict:
     players = canonicalize_replay_players(values)
     reason_codes: list[str] = []
@@ -325,10 +326,23 @@ def resolve_replay_teams(
         status = "resolved"
         game_format = "1v1"
         provenance = "one_vs_one_roster"
-    elif player_count not in {4, 6, 8}:
-        reason_codes.append("roster_incomplete" if player_count < 2 else "unsupported_team_format")
+    elif player_count < 2:
+        reason_codes.append(
+            "roster_incomplete"
+        )
         teams = []
-        status = "incomplete" if player_count < 2 else "unsupported"
+        status = "incomplete"
+        game_format = "unknown"
+        provenance = "unresolved"
+    elif (
+        player_count not in {4, 6, 8}
+        and not allow_uneven_teams
+    ):
+        reason_codes.append(
+            "unsupported_team_format"
+        )
+        teams = []
+        status = "unsupported"
         game_format = "unknown"
         provenance = "unresolved"
     elif any(player.get("team_id") is None for player in players):
@@ -344,15 +358,43 @@ def resolve_replay_teams(
             team_key = str(player["team_id"])
             grouped.setdefault(team_key, []).append(player)
             original_team_ids.setdefault(team_key, player["team_id"])
+        # AOE2WAR_PASS7_ODD_ROSTER_COMPATIBILITY
+        #
+        # Pass 7 permits odd player counts only when the replay
+        # provides exactly two explicit teams. Malformed odd-player
+        # fragments retain their historical unsupported status.
         if len(grouped) != 2:
-            reason_codes.append("expected_exactly_two_teams")
+            reason_codes.append(
+                "unsupported_team_format"
+                if (
+                    allow_uneven_teams
+                    and player_count not in {4, 6, 8}
+                )
+                else "expected_exactly_two_teams"
+            )
+
         expected_size = player_count // 2
-        if any(len(team_players) != expected_size for team_players in grouped.values()):
-            reason_codes.append("unequal_team_sizes")
+
+        if (
+            not allow_uneven_teams
+            and any(
+                len(team_players) != expected_size
+                for team_players in grouped.values()
+            )
+        ):
+            reason_codes.append(
+                "unequal_team_sizes"
+            )
 
         if reason_codes:
             teams = []
-            status = "conflicting"
+
+            status = (
+                "unsupported"
+                if "unsupported_team_format" in reason_codes
+                else "conflicting"
+            )
+
             game_format = "unknown"
             provenance = "unresolved"
         else:
@@ -373,8 +415,22 @@ def resolve_replay_teams(
                     }
                 )
             status = "resolved"
-            game_format = f"{expected_size}v{expected_size}"
-            provenance = "explicit_final_team_ids" if final else "explicit_replay_team_ids"
+
+            team_sizes = [
+                len(team["player_keys"])
+                for team in teams
+            ]
+
+            game_format = "v".join(
+                str(size)
+                for size in team_sizes
+            )
+
+            provenance = (
+                "explicit_final_team_ids"
+                if final
+                else "explicit_replay_team_ids"
+            )
 
     winner_flag_team_id = None
     single_team_winner_flag_team_id = None
@@ -444,7 +500,12 @@ def resolve_replay_teams(
     return result
 
 
-def apply_replay_team_contract(stats: Any, *, final: bool | None = None) -> Any:
+def apply_replay_team_contract(
+    stats: Any,
+    *,
+    final: bool | None = None,
+    allow_uneven_teams: bool = False,
+) -> Any:
     if not isinstance(stats, dict):
         return stats
     players = canonicalize_replay_players(stats.get("players"))
@@ -456,6 +517,7 @@ def apply_replay_team_contract(stats: Any, *, final: bool | None = None) -> Any:
         players,
         final=is_final,
         key_events=key_events,
+        allow_uneven_teams=allow_uneven_teams,
     )
     completion_source = str(
         stats.get("completion_source") or key_events.get("completion_source") or ""
@@ -505,3 +567,59 @@ def apply_replay_team_contract(stats: Any, *, final: bool | None = None) -> Any:
     stats["winning_player_names"] = resolution["winning_player_names"]
     stats["result_resolution"] = key_events["result_resolution"]
     return stats
+
+
+# AOE2WAR_HD_DETERMINISTIC_EVIDENCE_PASS7
+def apply_replay_team_contract_pass7(
+    stats: Any,
+    *,
+    final: bool | None = None,
+) -> Any:
+    """
+    Private Engine Room Pass 7 projection.
+
+    Preserve exactly two explicit teams even when their sizes differ.
+    Missing team IDs, duplicate identities, one-team structures,
+    three-team structures and result conflicts still fail closed.
+
+    Normal replay uploads continue through apply_replay_team_contract()
+    with allow_uneven_teams=False.
+    """
+    # AOE2WAR_PASS7_METADATA_FRAGMENT_AUTHORITY_GATE
+    #
+    # A metadata-fragment fallback may recover useful roster,
+    # civilization and identity evidence, but its platform metadata
+    # is not sufficient to expand the accepted team-format envelope.
+    #
+    # Preserve Pass 6 team classification for these degraded
+    # projections. Exact full-replay candidates remain eligible for
+    # Pass 7 uneven-team reconstruction.
+    if not isinstance(stats, dict):
+        return stats
+
+    players = (
+        stats.get("players")
+        if isinstance(stats.get("players"), list)
+        else []
+    )
+
+    key_events = (
+        stats.get("key_events")
+        if isinstance(stats.get("key_events"), dict)
+        else {}
+    )
+
+    metadata_fragment_projection = bool(
+        key_events.get("header_metadata_fragment_recovery")
+        or any(
+            isinstance(player, dict)
+            and player.get("metadata_fragment") is True
+            for player in players
+        )
+    )
+
+    return apply_replay_team_contract(
+        stats,
+        final=final,
+        allow_uneven_teams=not metadata_fragment_projection,
+    )

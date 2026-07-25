@@ -245,8 +245,8 @@ def test_parser_pass_identity_is_explicit_and_idempotent():
     assert identity["implementation"] == PARSER_IMPLEMENTATION
     assert identity["pass_name"] == PARSER_PASS_NAME
     assert identity["implementation_version"] == "1.8.51"
-    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-16.4"
-    assert identity["pass_version"] == PARSER_PASS_VERSION == "6"
+    assert identity["schema_version"] == PARSER_SCHEMA_VERSION == "2026-07-24.1"
+    assert identity["pass_version"] == PARSER_PASS_VERSION == "7"
     assert pass_idempotency_key("a" * 64, identity) == pass_idempotency_key("a" * 64, identity)
     assert pass_idempotency_key("a" * 64, identity) != pass_idempotency_key("b" * 64, identity)
 

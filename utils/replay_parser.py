@@ -23,7 +23,11 @@ from utils.replay_engine import (
     capture_summary_evidence,
     normalize_failure_signature,
 )
-from utils.replay_team_contract import apply_replay_team_contract, resolve_replay_teams
+from utils.replay_team_contract import (
+    apply_replay_team_contract,
+    apply_replay_team_contract_pass7,
+    resolve_replay_teams,
+)
 
 
 MGZ_HD_TYPE9_GAME_TYPE_LABEL = "TurboRandom9"
@@ -297,7 +301,7 @@ def parse_replay_candidate_bytes(
     if isinstance(parsed, dict):
         evidence = parsed.pop("_engine_evidence", None)
         evidence_failure = parsed.pop("_engine_evidence_failure", None)
-        parsed = apply_replay_team_contract(parsed)
+        parsed = apply_replay_team_contract_pass7(parsed)
         diagnostic = parse_diagnostic or evidence_failure
     else:
         evidence = None

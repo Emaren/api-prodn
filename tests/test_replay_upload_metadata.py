@@ -617,3 +617,207 @@ def test_should_refresh_reviewed_match_when_scores_arrive_without_duration_gain(
         [],
         ["order", "move"],
     )
+
+
+# AOE2WAR_NEXT_GAME_INGESTION_V1_TESTS
+import pytest
+from fastapi import HTTPException
+
+from routes.replay_routes_async import (
+    FINALITY_FINAL_UNPARSED_PROOF,
+    _derive_replay_file_role,
+    _normalize_client_sha256,
+    _statistics_complete,
+    _validate_upload_integrity,
+)
+
+
+def test_aoe2mpgame_is_never_effectively_final():
+    contract = _derive_replay_file_role(
+        ".aoe2mpgame",
+        None,
+        True,
+    )
+
+    assert contract == {
+        "file_role": "live_checkpoint",
+        "role_source": "extension_enforced",
+        "requested_final": True,
+        "effective_is_final": False,
+        "checkpoint_final_rejected": True,
+    }
+
+
+def test_explicit_checkpoint_role_cannot_become_final():
+    contract = _derive_replay_file_role(
+        ".aoe2record",
+        "live_checkpoint",
+        True,
+    )
+
+    assert contract["file_role"] == (
+        "live_checkpoint"
+    )
+    assert contract["effective_is_final"] is False
+    assert contract["checkpoint_final_rejected"] is True
+
+
+def test_legacy_watcher_final_aoe2record_is_inferred_safely():
+    contract = _derive_replay_file_role(
+        ".aoe2record",
+        None,
+        True,
+    )
+
+    assert contract["file_role"] == (
+        "final_recording"
+    )
+    assert contract["effective_is_final"] is True
+    assert contract["checkpoint_final_rejected"] is False
+
+
+def test_live_aoe2record_iteration_remains_checkpoint_role():
+    contract = _derive_replay_file_role(
+        ".aoe2record",
+        None,
+        False,
+    )
+
+    assert contract["file_role"] == (
+        "live_checkpoint"
+    )
+    assert contract["effective_is_final"] is False
+
+
+def test_explicit_final_role_rejects_nonfinal_flag():
+    with pytest.raises(
+        HTTPException
+    ) as error:
+        _derive_replay_file_role(
+            ".aoe2record",
+            "final_recording",
+            False,
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_client_sha256_normalization_and_validation():
+    digest = "A" * 64
+
+    assert _normalize_client_sha256(
+        digest
+    ) == "a" * 64
+
+    assert _normalize_client_sha256(
+        None
+    ) is None
+
+    with pytest.raises(
+        HTTPException
+    ) as error:
+        _normalize_client_sha256(
+            "not-a-digest"
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_upload_integrity_rejects_size_or_hash_mismatch():
+    digest = "a" * 64
+
+    _validate_upload_integrity(
+        written=100,
+        claimed_size=100,
+        server_sha256=digest,
+        client_sha256=digest,
+    )
+
+    with pytest.raises(
+        HTTPException
+    ) as size_error:
+        _validate_upload_integrity(
+            written=101,
+            claimed_size=100,
+            server_sha256=digest,
+            client_sha256=digest,
+        )
+
+    assert size_error.value.status_code == 409
+
+    with pytest.raises(
+        HTTPException
+    ) as hash_error:
+        _validate_upload_integrity(
+            written=100,
+            claimed_size=100,
+            server_sha256=digest,
+            client_sha256="b" * 64,
+        )
+
+    assert hash_error.value.status_code == 409
+
+
+def test_statistics_complete_requires_full_postgame_population():
+    assert _statistics_complete(
+        {
+            "postgame_available": True,
+            "achievement_player_count": 8,
+        },
+        8,
+    )
+
+    assert not _statistics_complete(
+        {
+            "postgame_available": True,
+            "achievement_player_count": 7,
+        },
+        8,
+    )
+
+    assert not _statistics_complete(
+        {
+            "postgame_available": False,
+            "achievement_player_count": 8,
+        },
+        8,
+    )
+
+
+def test_finality_response_exposes_recovery_contract():
+    response = _finality_response(
+        {
+            "is_final": True,
+            "players_count": 4,
+            "winner": "Unknown",
+            "file_role": "final_recording",
+            "file_role_source": "extension_inferred",
+            "file_extension": ".aoe2record",
+            "requested_final": True,
+            "archive_verified": True,
+            "statistics_complete": False,
+            "recovery_queued": True,
+            "recovery_reason": (
+                "latest_deterministic_evidence_pass"
+            ),
+            "client_sha256_supplied": False,
+            "client_sha256_verified": False,
+            "file_size_verified": True,
+        },
+        finality_status=(
+            FINALITY_FINAL_UNPARSED_PROOF
+        ),
+        unparsed_final=True,
+        raw_replay_archived=True,
+    )
+
+    assert response["file_role"] == (
+        "final_recording"
+    )
+    assert response["archive_verified"] is True
+    assert response["statistics_complete"] is False
+    assert response["recovery_queued"] is True
+    assert response["betting_eligible"] is False
+    assert response["safe_public_status"] == (
+        "Final replay secured; automatic recovery queued"
+    )

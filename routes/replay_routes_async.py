@@ -53,6 +53,16 @@ WATCHER_KEY_RE = re.compile(r"^wolo_([a-f0-9]{12})_(.+)$", re.IGNORECASE)
 
 REPLAY_ARCHIVE_SUFFIXES = {".aoe2record", ".aoe2mpgame", ".mgz", ".mgx", ".mgl"}
 
+# AOE2WAR_NEXT_GAME_INGESTION_V1
+CHECKPOINT_REPLAY_SUFFIXES = {".aoe2mpgame"}
+FINAL_REPLAY_SUFFIXES = {".aoe2record", ".mgz", ".mgx", ".mgl"}
+REPLAY_FILE_ROLES = {
+    "live_checkpoint",
+    "final_recording",
+    "legacy_recording",
+}
+CLIENT_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+
 
 def _archive_uploaded_replay(
     temp_path: str,
@@ -202,6 +212,267 @@ def _clean_header_string(value: Optional[str], max_length: int = 120) -> Optiona
     return cleaned[:max_length] if cleaned else None
 
 
+def _normalize_client_sha256(
+    value: Optional[str],
+) -> Optional[str]:
+    cleaned = _clean_header_string(value, 64)
+
+    if not cleaned:
+        return None
+
+    normalized = cleaned.lower()
+
+    if not CLIENT_SHA256_RE.fullmatch(normalized):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "x-client-sha256 must be a "
+                "64-character SHA-256 hex digest"
+            ),
+        )
+
+    return normalized
+
+
+def _derive_replay_file_role(
+    suffix: str,
+    requested_role: Optional[str],
+    requested_final: bool,
+) -> dict:
+    normalized_suffix = str(
+        suffix or ""
+    ).strip().lower()
+
+    explicit_role = (
+        str(requested_role or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+
+    if (
+        explicit_role
+        and explicit_role not in REPLAY_FILE_ROLES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported replay file role",
+        )
+
+    # Saved-game checkpoints are never final result truth,
+    # regardless of what an older watcher supplied in x-is-final.
+    if normalized_suffix in CHECKPOINT_REPLAY_SUFFIXES:
+        return {
+            "file_role": "live_checkpoint",
+            "role_source": "extension_enforced",
+            "requested_final": bool(requested_final),
+            "effective_is_final": False,
+            "checkpoint_final_rejected": bool(
+                requested_final
+            ),
+        }
+
+    # An explicit future watcher role is authoritative for live
+    # iterations. A final flag cannot override an explicit checkpoint.
+    if explicit_role == "live_checkpoint":
+        return {
+            "file_role": "live_checkpoint",
+            "role_source": "explicit_header",
+            "requested_final": bool(requested_final),
+            "effective_is_final": False,
+            "checkpoint_final_rejected": bool(
+                requested_final
+            ),
+        }
+
+    # A future watcher must not declare a final role while sending
+    # an explicitly non-final iteration.
+    if (
+        explicit_role in {
+            "final_recording",
+            "legacy_recording",
+        }
+        and not requested_final
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Final replay file role conflicts "
+                "with x-is-final=false"
+            ),
+        )
+
+    # x-is-final remains the compatibility authority for v1.5.6,
+    # which does not yet send x-file-role.
+    if not requested_final:
+        return {
+            "file_role": "live_checkpoint",
+            "role_source": "final_flag_inferred",
+            "requested_final": False,
+            "effective_is_final": False,
+            "checkpoint_final_rejected": False,
+        }
+
+    if explicit_role in {
+        "final_recording",
+        "legacy_recording",
+    }:
+        file_role = explicit_role
+        role_source = "explicit_header"
+    elif normalized_suffix == ".aoe2record":
+        file_role = "final_recording"
+        role_source = "extension_inferred"
+    else:
+        file_role = "legacy_recording"
+        role_source = "extension_inferred"
+
+    return {
+        "file_role": file_role,
+        "role_source": role_source,
+        "requested_final": True,
+        "effective_is_final": True,
+        "checkpoint_final_rejected": False,
+    }
+
+
+def _validate_upload_integrity(
+    *,
+    written: int,
+    claimed_size: int,
+    server_sha256: str,
+    client_sha256: Optional[str],
+) -> None:
+    if (
+        claimed_size > 0
+        and claimed_size != written
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Replay changed while it was being uploaded: "
+                f"watcher size={claimed_size}, "
+                f"received size={written}"
+            ),
+        )
+
+    if (
+        client_sha256
+        and not hmac.compare_digest(
+            client_sha256,
+            server_sha256,
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Client and server replay SHA-256 "
+                "values do not match"
+            ),
+        )
+
+
+def _verify_archived_replay(
+    archive_path: Optional[str],
+    expected_sha256: str,
+    expected_size: int,
+) -> bool:
+    if not archive_path:
+        return False
+
+    path = Path(
+        archive_path
+    )
+
+    try:
+        if not path.is_file():
+            return False
+
+        if (
+            expected_size > 0
+            and path.stat().st_size != expected_size
+        ):
+            return False
+
+        digest = hashlib.sha256()
+
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                digest.update(
+                    chunk
+                )
+
+        return hmac.compare_digest(
+            digest.hexdigest(),
+            expected_sha256,
+        )
+    except OSError:
+        return False
+
+
+def _statistics_complete(
+    key_events: object,
+    player_count: int,
+) -> bool:
+    if not isinstance(
+        key_events,
+        dict,
+    ):
+        return False
+
+    if player_count < 2:
+        return False
+
+    postgame_available = bool(
+        key_events.get(
+            "postgame_available"
+        )
+        or key_events.get(
+            "has_achievements"
+        )
+    )
+
+    try:
+        achievement_count = int(
+            key_events.get(
+                "achievement_player_count"
+            )
+            or 0
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        achievement_count = 0
+
+    try:
+        score_count = int(
+            key_events.get(
+                "player_score_count"
+            )
+            or 0
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        score_count = 0
+
+    return bool(
+        postgame_available
+        and max(
+            achievement_count,
+            score_count,
+        ) >= player_count
+    )
+
+
 def _finality_response(
     payload: dict,
     *,
@@ -284,6 +555,65 @@ def _finality_response(
         "raw_replay_archived": artifact_archived,
         "artifact_archived": artifact_archived,
         "artifact_accepted": artifact_accepted,
+        "archive_verified": bool(
+            payload.get("archive_verified")
+        ),
+        "file_role": payload.get("file_role"),
+        "file_role_source": payload.get(
+            "file_role_source"
+        ),
+        "file_extension": payload.get(
+            "file_extension"
+        ),
+        "requested_final": bool(
+            payload.get("requested_final")
+        ),
+        "effective_is_final": is_final,
+        "checkpoint_final_rejected": bool(
+            payload.get(
+                "checkpoint_final_rejected"
+            )
+        ),
+        "watcher_version": payload.get(
+            "watcher_version"
+        ),
+        "watcher_platform": payload.get(
+            "watcher_platform"
+        ),
+        "watcher_architecture": payload.get(
+            "watcher_architecture"
+        ),
+        "client_sha256_supplied": bool(
+            payload.get(
+                "client_sha256_supplied"
+            )
+        ),
+        "client_sha256_verified": bool(
+            payload.get(
+                "client_sha256_verified"
+            )
+        ),
+        "file_size_verified": bool(
+            payload.get(
+                "file_size_verified"
+            )
+        ),
+        "statistics_complete": bool(
+            payload.get(
+                "statistics_complete"
+            )
+        ),
+        "recovery_queued": bool(
+            payload.get(
+                "recovery_queued"
+            )
+        ),
+        "recovery_reason": payload.get(
+            "recovery_reason"
+        ),
+        "terminal_reason": payload.get(
+            "terminal_reason"
+        ),
         "parse_completed": parse_completed,
         "final_submission_received": is_final,
         "final_artifact_accepted": bool(is_final and artifact_accepted),
@@ -314,8 +644,19 @@ def _finality_response(
         "betting_eligible": betting_eligible,
         "stats_eligible": stats_eligible,
         "safe_public_status": (
-            "Final accepted"
+            "Checkpoint secured; not eligible for final result truth"
+            if payload.get(
+                "checkpoint_final_rejected"
+            )
+            else "Final accepted"
             if final_accepted
+            else "Final replay secured; automatic recovery queued"
+            if (
+                is_final
+                and payload.get(
+                    "recovery_queued"
+                )
+            )
             else "Final replay received"
             if is_final
             else "Live replay received"
@@ -352,16 +693,42 @@ def _watcher_upload_metadata(
     *,
     watcher_id: Optional[str],
     watcher_session_id: Optional[str],
+    watcher_version: Optional[str],
+    watcher_platform: Optional[str],
+    watcher_architecture: Optional[str],
     replay_fingerprint: Optional[str],
     file_size_bytes: Optional[str],
     file_mtime_ms: Optional[str],
     final_candidate: Optional[str],
+    file_role: str,
+    file_role_source: str,
+    client_sha256: Optional[str],
+    server_sha256: str,
+    checkpoint_final_rejected: bool,
 ) -> dict:
     metadata = {}
     cleaned_watcher_id = _clean_header_string(watcher_id, 80)
     cleaned_session_id = _clean_header_string(watcher_session_id, 120)
-    cleaned_fingerprint = _clean_header_string(replay_fingerprint, 120)
-    parsed_file_size = _parse_positive_int_header(file_size_bytes, 0)
+    cleaned_fingerprint = _clean_header_string(
+        replay_fingerprint,
+        120,
+    )
+    cleaned_watcher_version = _clean_header_string(
+        watcher_version,
+        32,
+    )
+    cleaned_platform = _clean_header_string(
+        watcher_platform,
+        32,
+    )
+    cleaned_architecture = _clean_header_string(
+        watcher_architecture,
+        32,
+    )
+    parsed_file_size = _parse_positive_int_header(
+        file_size_bytes,
+        0,
+    )
     parsed_mtime = _parse_positive_int_header(file_mtime_ms, 0)
 
     if cleaned_watcher_id:
@@ -369,7 +736,42 @@ def _watcher_upload_metadata(
     if cleaned_session_id:
         metadata["watcher_session_id"] = cleaned_session_id
     if cleaned_fingerprint:
-        metadata["replay_fingerprint"] = cleaned_fingerprint
+        metadata["replay_fingerprint"] = (
+            cleaned_fingerprint
+        )
+
+    if cleaned_watcher_version:
+        metadata["watcher_version"] = (
+            cleaned_watcher_version
+        )
+
+    if cleaned_platform:
+        metadata["watcher_platform"] = (
+            cleaned_platform
+        )
+
+    if cleaned_architecture:
+        metadata["watcher_architecture"] = (
+            cleaned_architecture
+        )
+
+    metadata["file_role"] = file_role
+    metadata["file_role_source"] = (
+        file_role_source
+    )
+    metadata["server_sha256"] = (
+        server_sha256
+    )
+    metadata["checkpoint_final_rejected"] = bool(
+        checkpoint_final_rejected
+    )
+
+    if client_sha256:
+        metadata["client_sha256"] = (
+            client_sha256
+        )
+        metadata["client_sha256_verified"] = True
+
     if parsed_file_size > 0:
         metadata["file_size_bytes"] = parsed_file_size
     if parsed_mtime > 0:
@@ -1220,6 +1622,11 @@ async def upload_replay_file(
     x_parse_reason: Optional[str] = Header(default=None, alias="x-parse-reason"),
     x_watcher_id: Optional[str] = Header(default=None, alias="x-watcher-id"),
     x_watcher_session_id: Optional[str] = Header(default=None, alias="x-watcher-session-id"),
+    x_watcher_version: Optional[str] = Header(default=None, alias="x-watcher-version"),
+    x_watcher_platform: Optional[str] = Header(default=None, alias="x-watcher-platform"),
+    x_watcher_architecture: Optional[str] = Header(default=None, alias="x-watcher-architecture"),
+    x_file_role: Optional[str] = Header(default=None, alias="x-file-role"),
+    x_client_sha256: Optional[str] = Header(default=None, alias="x-client-sha256"),
     x_replay_fingerprint: Optional[str] = Header(default=None, alias="x-replay-fingerprint"),
     x_file_size_bytes: Optional[str] = Header(default=None, alias="x-file-size-bytes"),
     x_file_mtime_ms: Optional[str] = Header(default=None, alias="x-file-mtime-ms"),
@@ -1248,15 +1655,61 @@ async def upload_replay_file(
         await file.close()
 
     try:
-        replay_hash = await hash_replay_file(temp_path)
+        replay_hash = await hash_replay_file(
+            temp_path
+        )
+
+        if not replay_hash:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Failed to hash replay file"
+                ),
+            )
+
+        replay_hash = str(
+            replay_hash
+        ).strip().lower()
+
+        client_sha256 = _normalize_client_sha256(
+            x_client_sha256
+        )
+
+        claimed_file_size = _parse_positive_int_header(
+            x_file_size_bytes,
+            0,
+        )
+
+        _validate_upload_integrity(
+            written=written,
+            claimed_size=claimed_file_size,
+            server_sha256=replay_hash,
+            client_sha256=client_sha256,
+        )
+
         raw_replay_archive_path = _archive_uploaded_replay(
             temp_path,
             replay_hash,
             original_name,
             written,
         )
-        if not replay_hash:
-            raise HTTPException(status_code=500, detail="Failed to hash replay file")
+
+        archive_verified = _verify_archived_replay(
+            raw_replay_archive_path,
+            replay_hash,
+            written,
+        )
+
+        if (
+            raw_replay_archive_path
+            and not archive_verified
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Replay archive verification failed"
+                ),
+            )
 
         parse_failure_detail = (
             "Failed to parse replay file. The replay may still be finalizing on disk; retry shortly."
@@ -1265,16 +1718,151 @@ async def upload_replay_file(
         async with db_gen as db:
             uploader_uid, mode = await _resolve_upload_identity(db, x_api_key, user_uid)
             uploader_user = await _load_user_by_uid(db, uploader_uid)
-            is_final_upload = _parse_bool_header(x_is_final, True)
-            parse_iteration = _parse_positive_int_header(x_parse_iteration, 1)
+            requested_final_upload = _parse_bool_header(
+                x_is_final,
+                True,
+            )
+
+            role_contract = _derive_replay_file_role(
+                suffix,
+                x_file_role,
+                requested_final_upload,
+            )
+
+            is_final_upload = bool(
+                role_contract[
+                    "effective_is_final"
+                ]
+            )
+
+            if (
+                is_final_upload
+                and not archive_verified
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Final replay could not be "
+                        "durably archive-verified; "
+                        "retry upload"
+                    ),
+                )
+
+            parse_iteration = _parse_positive_int_header(
+                x_parse_iteration,
+                1,
+            )
+
+            statistics_complete = False
+
             watcher_upload = _watcher_upload_metadata(
                 watcher_id=x_watcher_id,
                 watcher_session_id=x_watcher_session_id,
+                watcher_version=x_watcher_version,
+                watcher_platform=x_watcher_platform,
+                watcher_architecture=x_watcher_architecture,
                 replay_fingerprint=x_replay_fingerprint,
                 file_size_bytes=x_file_size_bytes,
                 file_mtime_ms=x_file_mtime_ms,
                 final_candidate=x_final_candidate,
+                file_role=str(
+                    role_contract["file_role"]
+                ),
+                file_role_source=str(
+                    role_contract["role_source"]
+                ),
+                client_sha256=client_sha256,
+                server_sha256=replay_hash,
+                checkpoint_final_rejected=bool(
+                    role_contract[
+                        "checkpoint_final_rejected"
+                    ]
+                ),
             )
+
+            def upload_finality(
+                payload: dict,
+                **kwargs,
+            ):
+                recovery_queued = bool(
+                    is_final_upload
+                    and archive_verified
+                )
+
+                enriched_payload = {
+                    **payload,
+                    "is_final": is_final_upload,
+                    "file_role": (
+                        role_contract["file_role"]
+                    ),
+                    "file_role_source": (
+                        role_contract["role_source"]
+                    ),
+                    "file_extension": suffix,
+                    "requested_final": (
+                        role_contract[
+                            "requested_final"
+                        ]
+                    ),
+                    "checkpoint_final_rejected": (
+                        role_contract[
+                            "checkpoint_final_rejected"
+                        ]
+                    ),
+                    "watcher_version": (
+                        _clean_header_string(
+                            x_watcher_version,
+                            32,
+                        )
+                    ),
+                    "watcher_platform": (
+                        _clean_header_string(
+                            x_watcher_platform,
+                            32,
+                        )
+                    ),
+                    "watcher_architecture": (
+                        _clean_header_string(
+                            x_watcher_architecture,
+                            32,
+                        )
+                    ),
+                    "client_sha256_supplied": (
+                        client_sha256 is not None
+                    ),
+                    "client_sha256_verified": (
+                        client_sha256 is not None
+                    ),
+                    "file_size_verified": (
+                        claimed_file_size > 0
+                    ),
+                    "archive_verified": (
+                        archive_verified
+                    ),
+                    "statistics_complete": (
+                        statistics_complete
+                    ),
+                    "recovery_queued": (
+                        recovery_queued
+                    ),
+                    "recovery_reason": (
+                        "latest_deterministic_evidence_pass"
+                        if recovery_queued
+                        else None
+                    ),
+                    "terminal_reason": (
+                        "checkpoint_artifact_not_final_truth"
+                        if role_contract[
+                            "checkpoint_final_rejected"
+                        ]
+                        else None
+                    ),
+                }
+
+                return _finality_response(
+                    enriched_payload,
+                    **kwargs,
+                )
             parse_source_hint, _ = _derive_upload_parse_metadata(
                 upload_mode=mode,
                 is_final=is_final_upload,
@@ -1352,7 +1940,7 @@ async def upload_replay_file(
                         game_stats_id=existing_placeholder_live.id,
                     )
                     await db.commit()
-                    return _finality_response(
+                    return upload_finality(
                         {
                             "message": "Replay detected early; placeholder live session stored.",
                             "replay_hash": replay_hash,
@@ -1409,7 +1997,7 @@ async def upload_replay_file(
                             played_on=fallback_played_on,
                         )
                         await db.commit()
-                        return _finality_response(
+                        return upload_finality(
                             {
                                 "message": "Watcher final proof row already exists; raw replay archived for future parser backfill.",
                                 "replay_hash": replay_hash,
@@ -1486,7 +2074,7 @@ async def upload_replay_file(
                         played_on=fallback_played_on,
                     )
                     await db.commit()
-                    return _finality_response(
+                    return upload_finality(
                         {
                             "message": "Watcher final replay preserved as unparsed proof.",
                             "replay_hash": replay_hash,
@@ -1523,7 +2111,20 @@ async def upload_replay_file(
             }
             players = parsed.get("players") if isinstance(parsed.get("players"), list) else []
             event_types = parsed.get("event_types") if isinstance(parsed.get("event_types"), list) else []
-            key_events = parsed.get("key_events") if isinstance(parsed.get("key_events"), dict) else {}
+            key_events = (
+                parsed.get("key_events")
+                if isinstance(
+                    parsed.get("key_events"),
+                    dict,
+                )
+                else {}
+            )
+
+            statistics_complete = _statistics_complete(
+                key_events,
+                len(players),
+            )
+
             if watcher_upload:
                 key_events = dict(key_events)
                 key_events["watcher_upload"] = watcher_upload
@@ -1602,7 +2203,7 @@ async def upload_replay_file(
                         played_on=played_on,
                     )
                     await db.commit()
-                    return _finality_response(
+                    return upload_finality(
                         {
                             "message": f"Replay iteration {parse_iteration} parsed and replaced placeholder live session.",
                             "replay_hash": replay_hash,
@@ -1666,7 +2267,7 @@ async def upload_replay_file(
                         played_on=played_on,
                     )
                     await db.commit()
-                    return _finality_response(
+                    return upload_finality(
                         {
                             "message": "Replay final refreshed with clearer completion metadata.",
                             "replay_hash": replay_hash,
@@ -1699,7 +2300,7 @@ async def upload_replay_file(
                     played_on=played_on,
                 )
                 await db.commit()
-                return _finality_response(
+                return upload_finality(
                     {
                         "message": "Replay already parsed as final. Skipped.",
                         "replay_hash": replay_hash,
@@ -1773,7 +2374,7 @@ async def upload_replay_file(
                             played_on=played_on,
                         )
                         await db.commit()
-                        return _finality_response(
+                        return upload_finality(
                             {
                                 "message": "Reviewed match refreshed with later final replay data.",
                                 "replay_hash": replay_hash,
@@ -1807,7 +2408,7 @@ async def upload_replay_file(
                         played_on=played_on,
                     )
                     await db.commit()
-                    return _finality_response(
+                    return upload_finality(
                         {
                             "message": "Reviewed match already stored. Skipped.",
                             "replay_hash": replay_hash,
@@ -1871,7 +2472,7 @@ async def upload_replay_file(
                             played_on=played_on,
                         )
                         await db.commit()
-                        return _finality_response(
+                        return upload_finality(
                             {
                                 "message": f"Replay iteration {parse_iteration} parsed and replaced placeholder live session.",
                                 "replay_hash": replay_hash,
@@ -1901,7 +2502,7 @@ async def upload_replay_file(
                         played_on=played_on,
                     )
                     await db.commit()
-                    return _finality_response(
+                    return upload_finality(
                         {
                             "message": "Replay iteration already stored. Skipped.",
                             "replay_hash": replay_hash,
@@ -2022,7 +2623,7 @@ async def upload_replay_file(
             )
             await db.commit()
 
-        return _finality_response(
+        return upload_finality(
             {
                 "message": "Replay parsed and stored" if is_final_upload else f"Replay iteration {parse_iteration} stored",
                 "replay_hash": replay_hash,
