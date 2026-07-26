@@ -1,5 +1,17 @@
 # api-prodn
 
+## Verified production seal — 2026-07-26
+
+- checkout: `/var/www/AoE2HDBets/api-prodn`, clean `main` at `d2d68646b1aff3ffb9e647ee0fe4deaa143b2c6e`;
+- runtime: Python 3.12.3, FastAPI 0.128.0, Uvicorn 0.40.0, SQLAlchemy 2.0.45, psycopg2 2.9.11;
+- service: `aoe2hdbets-api.service`, loopback bind `127.0.0.1:3330`;
+- database: PostgreSQL 16.14, 71 applied source migrations, zero incomplete;
+- parser contract: `aoe2war.mgz_hd`, `mgz 1.8.51`, schema `2026-07-25.1`, pass `8`;
+- production inventory: 2,064 replay artifacts, 2,065 submissions, 4,746 parse runs, 43,925 parse attempts, and 678,804 normalized observations.
+
+The VPS remote-head probe may be unavailable when the production SSH alias is not loaded. Treat the expected clean checkout plus the canonical remote verification as the parity gate; do not rewrite the remote URL solely to make an audit command succeed.
+
+
 ## Replay completeness and finality contract
 
 Watcher responses expose `raw_replay_archived`, `artifact_accepted`, `parse_completed`, `final_submission_received`, `result_resolved`, `result_trusted`, `stats_eligible`, and `betting_eligible` as separate facts. The legacy `final_accepted` and `should_settle` fields remain settlement signals, not artifact-upload signals. Parse-completeness classes are `live_header`, `live_roster`, `final_result_only`, `final_unparsed_proof`, and `final_unsafe`.
