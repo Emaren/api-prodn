@@ -1,0 +1,15 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: api-prodn
+  title: AoE2WAR Replay API
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/aoe2war-api
+  system: aoe2war
+  dependsOn:
+    - resource:default/postgresql
+    - resource:default/replay-archive

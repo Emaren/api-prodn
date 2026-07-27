@@ -1,0 +1,121 @@
+{
+  "documents": [
+    {
+      "audience": [
+        "developers",
+        "operators",
+        "ai-agents"
+      ],
+      "authority": "repository-entrypoint",
+      "id": "aoe2war.api-prodn.readme",
+      "owner": "aoe2war-api",
+      "path": "README.md",
+      "review_interval_days": 60,
+      "reviewed_at": "2026-07-26",
+      "sensitivity": "internal",
+      "sha256": "b6934c033a389149db336ed7691868fc85a7b60c5b1cde150e01165abb7a84a4",
+      "source_of_truth": "git",
+      "status": "active",
+      "systems": [
+        "app-prodn",
+        "api-prodn"
+      ],
+      "title": "api-prodn",
+      "type": "reference"
+    },
+    {
+      "audience": [
+        "developers",
+        "ai-agents"
+      ],
+      "authority": "developer-procedure",
+      "id": "aoe2war.api-prodn.testing",
+      "owner": "aoe2war-api",
+      "path": "TESTING.md",
+      "review_interval_days": 60,
+      "reviewed_at": "2026-07-26",
+      "sensitivity": "internal",
+      "sha256": "a559e1b3cb3ef9ec7af073f72b5eadf39aeaf84cdb4b412b06cead3d8eb8e510",
+      "source_of_truth": "git",
+      "status": "active",
+      "systems": [
+        "api-prodn"
+      ],
+      "title": "api-prodn Testing",
+      "type": "how-to"
+    },
+    {
+      "audience": [
+        "ai-agents",
+        "developers"
+      ],
+      "authority": "ai-agent-contract",
+      "id": "aoe2war.api-prodn.agent-readme-agent",
+      "owner": "aoe2war-api",
+      "path": "agent/README.agent.md",
+      "review_interval_days": 30,
+      "reviewed_at": "2026-07-26",
+      "sensitivity": "internal",
+      "sha256": "5a07e0a43954199673c8e77f87218ae5199b242eb46afb5f91b1383014f4005d",
+      "source_of_truth": "git",
+      "status": "active",
+      "systems": [
+        "api-prodn"
+      ],
+      "title": "api-prodn AI Agent Guide",
+      "type": "reference"
+    },
+    {
+      "audience": [
+        "developers",
+        "operators",
+        "ai-agents"
+      ],
+      "authority": "generated-repository-index",
+      "id": "aoe2war.api-prodn.docs-documentation-control-plane",
+      "owner": "aoe2war-api",
+      "path": "docs/DOCUMENTATION_CONTROL_PLANE.md",
+      "review_interval_days": 0,
+      "reviewed_at": "2026-07-26",
+      "sensitivity": "internal",
+      "sha256": "0185af5fe79b0ece1eb97c9be2425395d9030b64d32ad5ac71aa0a6c7cb7b8e1",
+      "source_of_truth": "generated",
+      "status": "generated",
+      "systems": [
+        "api-prodn"
+      ],
+      "title": "api-prodn Documentation Index",
+      "type": "generated"
+    },
+    {
+      "audience": [
+        "operators",
+        "ai-agents"
+      ],
+      "authority": "operational-procedure",
+      "id": "aoe2war.api-prodn.docs-replay-engine-room-worker",
+      "owner": "aoe2war-api",
+      "path": "docs/REPLAY_ENGINE_ROOM_WORKER.md",
+      "review_interval_days": 30,
+      "reviewed_at": "2026-07-26",
+      "sensitivity": "restricted",
+      "sha256": "9719fdd5a8d80f2e3875973174e1e016a37c87d5245e608f311866d86c66ee79",
+      "source_of_truth": "git",
+      "status": "active",
+      "systems": [
+        "app-prodn",
+        "api-prodn"
+      ],
+      "title": "Replay Engine Room worker",
+      "type": "runbook"
+    }
+  ],
+  "generated_at": "2026-07-26T22:17:27.021354+00:00",
+  "implementation_baseline": {
+    "branch": "main",
+    "commit": "dbcb635342faea2fb2049e08626b954c65c8e5e2"
+  },
+  "owner": "aoe2war-api",
+  "repo": "api-prodn",
+  "schema_version": "2.1.0"
+}

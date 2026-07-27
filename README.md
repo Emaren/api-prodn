@@ -1,3 +1,18 @@
+---
+id: "aoe2war.api-prodn.readme"
+title: "api-prodn"
+type: "reference"
+status: "active"
+owner: "aoe2war-api"
+systems: ["app-prodn","api-prodn"]
+audience: ["developers","operators","ai-agents"]
+source_of_truth: "git"
+authority: "repository-entrypoint"
+reviewed_at: "2026-07-26"
+review_interval_days: 60
+sensitivity: "internal"
+---
+
 # api-prodn
 
 ## Verified production seal — 2026-07-26

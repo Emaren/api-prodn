@@ -1,3 +1,18 @@
+---
+id: "aoe2war.api-prodn.testing"
+title: "api-prodn Testing"
+type: "how-to"
+status: "active"
+owner: "aoe2war-api"
+systems: ["api-prodn"]
+audience: ["developers","ai-agents"]
+source_of_truth: "git"
+authority: "developer-procedure"
+reviewed_at: "2026-07-26"
+review_interval_days: 60
+sensitivity: "internal"
+---
+
 # api-prodn Testing
 
 Watcher ingestion changes run through the repository virtual environment’s `pytest` when available. `tests/test_replay_upload_metadata.py` is the hard metadata/finality response gate. Missing private replay fixtures remain a documented soft skip; never replace them with invented user data.

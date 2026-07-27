@@ -1,3 +1,18 @@
+---
+id: "aoe2war.api-prodn.docs-replay-engine-room-worker"
+title: "Replay Engine Room worker"
+type: "runbook"
+status: "active"
+owner: "aoe2war-api"
+systems: ["app-prodn","api-prodn"]
+audience: ["operators","ai-agents"]
+source_of_truth: "git"
+authority: "operational-procedure"
+reviewed_at: "2026-07-26"
+review_interval_days: 30
+sensitivity: "restricted"
+---
+
 # Replay Engine Room worker
 
 This worker replays a frozen CSV manifest through the deterministic HD parser
