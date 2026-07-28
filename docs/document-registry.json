@@ -78,7 +78,7 @@
       "review_interval_days": 0,
       "reviewed_at": "2026-07-26",
       "sensitivity": "internal",
-      "sha256": "0185af5fe79b0ece1eb97c9be2425395d9030b64d32ad5ac71aa0a6c7cb7b8e1",
+      "sha256": "5c8355ec16a39c8f3d38dacbb48b5b62bab547c40071168859588de8bea811bc",
       "source_of_truth": "generated",
       "status": "generated",
       "systems": [
@@ -113,7 +113,7 @@
   "generated_at": "2026-07-26T22:17:27.021354+00:00",
   "implementation_baseline": {
     "branch": "main",
-    "commit": "dbcb635342faea2fb2049e08626b954c65c8e5e2"
+    "commit": "f96ebf0f37999ae34163490939842c7ada590e85"
   },
   "owner": "aoe2war-api",
   "repo": "api-prodn",
