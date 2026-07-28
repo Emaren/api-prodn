@@ -31,6 +31,7 @@ EXCLUDED_EXACT = frozenset(
         "dist",
         "build",
         "site",
+        "runtime",
     }
 )
 EXCLUDED_PREFIXES = (".venv", "venv")
