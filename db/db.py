@@ -9,10 +9,15 @@ import config  # triggers layered .env loading
 # ────────────────────────────────────────────────────────────────
 # 🛠 Fix DATABASE_URL scheme if Render injects 'postgres://'
 # ────────────────────────────────────────────────────────────────
-raw_url = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://aoe2hd_user:aoe2hd_pass@localhost:5432/aoe2hd_db"
-).strip()
+raw_url = os.getenv("DATABASE_URL")
+
+if not raw_url:
+    raise RuntimeError(
+        "DATABASE_URL is required; "
+        "credentialed database fallbacks are forbidden"
+    )
+
+raw_url = raw_url.strip()
 
 if raw_url.startswith("postgres://"):
     raw_url = raw_url.replace("postgres://", "postgresql+asyncpg://", 1)

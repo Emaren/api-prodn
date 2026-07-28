@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "deploy": "curl -X POST 'https://api.render.com/deploy/srv-cvo1gk6uk2gs73bgjlb0?key=OvfEG8KeYyI'"
+    "security:scan": "python3 scripts/scan_tracked_secrets.py"
   },
   "dependencies": {
     "@cosmjs/amino": "^0.33.1",
