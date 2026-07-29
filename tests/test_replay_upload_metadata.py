@@ -1,9 +1,11 @@
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import routes.replay_routes_async as replay_routes
 from routes.replay_routes_async import (
     _finality_response,
     UNPARSED_FINAL_PARSE_REASON,
@@ -15,6 +17,7 @@ from routes.replay_routes_async import (
     _normalize_live_disconnect_detected,
     _parse_bool_header,
     _parse_positive_int_header,
+    _load_upload_identity_context,
     _statistics_available,
     _should_upgrade_duplicate_final,
     _should_refresh_reviewed_match,
@@ -90,6 +93,41 @@ def test_finality_response_exposes_retry_and_completeness_contract():
     assert final["final_accepted"] is True
     assert final["should_continue_monitoring"] is False
     assert final["betting_eligible"] is True
+
+
+def test_upload_identity_transaction_is_released_before_parsing(monkeypatch):
+    events = []
+    expected_user = SimpleNamespace(uid="watcher-user")
+
+    async def fake_resolve(db, api_key, claimed_uid):
+        events.append(("resolve", api_key, claimed_uid))
+        return "watcher-user", "watcher"
+
+    async def fake_load(db, uid):
+        events.append(("load", uid))
+        return expected_user
+
+    class FakeDb:
+        async def commit(self):
+            events.append(("commit",))
+
+    monkeypatch.setattr(replay_routes, "_resolve_upload_identity", fake_resolve)
+    monkeypatch.setattr(replay_routes, "_load_user_by_uid", fake_load)
+
+    result = asyncio.run(
+        _load_upload_identity_context(
+            FakeDb(),
+            "watcher-key",
+            "claimed-user",
+        )
+    )
+
+    assert result == ("watcher-user", "watcher", expected_user)
+    assert events == [
+        ("resolve", "watcher-key", "claimed-user"),
+        ("load", "watcher-user"),
+        ("commit",),
+    ]
 
 
 def test_final_recorded_separates_archive_stats_and_betting_readiness():

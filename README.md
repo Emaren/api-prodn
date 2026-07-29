@@ -33,6 +33,13 @@ Watcher responses expose `raw_replay_archived`, `artifact_accepted`, `parse_comp
 
 `final_recorded`, `final_recorded_duplicate`, and `final_recorded_refreshed` mean that final replay bytes were archived and the parsed game/result candidate was stored, but the result is not authorized for automatic settlement. Watchers should count these as archived/parsed and routed for correction, not as failed uploads and not as trusted finals. Only `trusted_final*` or `reviewed_match*` with `should_settle=true` permits the settlement path.
 
+Watcher authentication and uploader lookup are committed before binary parsing
+starts. This short-transaction boundary is deliberate: replay parsing runs in a
+worker thread, and holding the authentication transaction for that full CPU
+window can exhaust the async SQLAlchemy connection pool during an upload burst.
+Keep archive verification and finality semantics unchanged, but do not move
+`parse_replay_full` back inside a checked-out identity transaction.
+
 Trusted finality—not HTTP success—allows settlement. Disconnect/desync evidence, parser failure, watcher interruption, and silent disappearance are distinct. Unsafe winners never become betting eligible. Missing postgame/achievement values remain absent rather than becoming zeroes.
 
 `utils/replay_team_contract.py` is the canonical replay-player boundary. It normalizes alternate parser names once and preserves replay-observed name, Steam ID, civilization, color, position, explicit team ID (including valid team `0`), player number, winner flag, score, rating snapshot, EAPM, and achievements when present. It never infers team membership from array order. Team games resolve only with exactly two complete equal-size explicit teams. Because HD can flip winner/completion flags after the first teammate resignation, resignation proof resolves a team result only when exactly one full explicit team resigned; the opposing explicit team is then the derived winner. No fully resigned team, both teams resigned, partial resignation, or conflicting flags remain review-only unless independent postgame/scoreboard proof resolves them. `winning_team_id`, `winning_player_keys`, result provenance, confidence, and evidence are stored in `key_events.result_resolution` alongside `key_events.team_resolution`. The legacy scalar `winner` field never establishes team settlement truth.

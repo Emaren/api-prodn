@@ -1172,6 +1172,26 @@ async def _load_user_by_uid(db, uid: Optional[str]):
     return res.scalars().first()
 
 
+async def _load_upload_identity_context(
+    db,
+    x_api_key: Optional[str],
+    claimed_uid: str,
+):
+    """
+    Resolve the uploader in a short transaction before replay parsing begins.
+
+    Binary parsing runs in a worker thread and can take long enough for a burst
+    of watcher uploads to exhaust the SQLAlchemy pool if every request keeps its
+    authentication transaction checked out. ``expire_on_commit=False`` keeps
+    the loaded user fields available while allowing the session to release its
+    connection until persistence work resumes.
+    """
+    uploader_uid, mode = await _resolve_upload_identity(db, x_api_key, claimed_uid)
+    uploader_user = await _load_user_by_uid(db, uploader_uid)
+    await db.commit()
+    return uploader_uid, mode, uploader_user
+
+
 async def _record_parse_attempt(
     db,
     *,
@@ -1869,8 +1889,11 @@ async def upload_replay_file(
         )
 
         async with db_gen as db:
-            uploader_uid, mode = await _resolve_upload_identity(db, x_api_key, user_uid)
-            uploader_user = await _load_user_by_uid(db, uploader_uid)
+            uploader_uid, mode, uploader_user = await _load_upload_identity_context(
+                db,
+                x_api_key,
+                user_uid,
+            )
             requested_final_upload = _parse_bool_header(
                 x_is_final,
                 True,
