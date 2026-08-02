@@ -2603,7 +2603,11 @@ async def upload_replay_file(
                             played_on=played_on,
                         )
 
-                        if uploader_uid and uploader_uid != "system":
+                        if (
+                            semantic_refresh
+                            and uploader_uid
+                            and uploader_uid != "system"
+                        ):
                             method = "watcher" if mode == "watcher" else "replay_upload"
                             await _maybe_verify_user_from_replay(db, uploader_uid, players, x_player_name, method)
 
