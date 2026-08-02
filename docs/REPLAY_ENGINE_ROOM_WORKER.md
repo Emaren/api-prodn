@@ -43,10 +43,12 @@ and zero failed. Historical failed runs are retained.
   same game ID but different bytes is historical evidence only and is never
   current result, statistic, or settlement evidence.
 - Submission receipts are cohort-independent: legacy parse attempt when
-  available, otherwise linked `game_stats`, otherwise artifact + submitter.
-  Overlapping Jim/full-vault jobs therefore reuse and validate the same
-  immutable receipt. A repeated artifact/parser identity is verified and
-  counted as `skipped`; it is not parsed or inserted again.
+  available, otherwise linked `game_stats` + exact artifact SHA-256, otherwise
+  artifact + submitter. Overlapping jobs for the same game and exact bytes
+  therefore reuse and validate the same immutable receipt, while a later
+  finalized artifact for the same logical game receives a distinct receipt.
+  A repeated artifact/parser identity is verified and counted as `skipped`; it
+  is not parsed or inserted again.
 - The complete observation catalog remains in the compressed candidate object.
   Postgres stores only material observations: non-`absent` rows plus
   result-critical conflict/inference rows even when their value is null. The

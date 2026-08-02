@@ -255,17 +255,23 @@ def submission_receipt_identity(
             "legacy_parse_attempt_id": reference.legacy_parse_attempt_id,
         }
         identity_kind = "legacy_parse_attempt"
+        identity_version = 1
     elif reference.game_stats_id is not None:
-        identity_basis = {"game_stats_id": reference.game_stats_id}
-        identity_kind = "game_stats"
+        identity_basis = {
+            "game_stats_id": reference.game_stats_id,
+            "artifact_sha256": row.replay_hash,
+        }
+        identity_kind = "game_stats_artifact"
+        identity_version = 2
     else:
         identity_basis = {
             "artifact_sha256": row.replay_hash,
             "submitter_uid": reference.submitter_uid,
         }
         identity_kind = "artifact_submitter"
+        identity_version = 1
     identity_material = {
-        "version": 1,
+        "version": identity_version,
         "source": "engine_room_manifest",
         "identity_kind": identity_kind,
         **identity_basis,
@@ -275,7 +281,7 @@ def submission_receipt_identity(
     transport_metadata = {
         "candidate_only": True,
         "affects_public_aggregates": False,
-        "receipt_identity_version": 1,
+        "receipt_identity_version": identity_version,
         "receipt_identity_kind": identity_kind,
         "game_stats_id": reference.game_stats_id,
         "game_stats_linkage": (

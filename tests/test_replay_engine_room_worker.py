@@ -448,6 +448,54 @@ def test_submission_receipt_is_stable_across_overlapping_cohort_jobs(
     assert "manifest_sha256" not in first[2]
 
 
+def test_game_stats_submission_receipt_is_artifact_specific(
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "archive"
+    archive_path = _archive_file(
+        archive_root,
+        b"stale prefix bytes",
+    )
+    manifest = tmp_path / "manifest.csv"
+    _manifest(manifest, archive_root, archive_path)
+    stale_row = reconcile_frozen_manifest(
+        manifest,
+        archive_root,
+    ).rows[0]
+    final_row = replace(
+        stale_row,
+        replay_hash="b" * 64,
+        byte_size=stale_row.byte_size + 1024,
+    )
+    reference = ManifestReference(
+        game_stats_id=20438,
+        legacy_parse_attempt_id=None,
+        submitter_user_id=7,
+        submitter_uid="u_emaren",
+    )
+
+    stale = submission_receipt_identity(
+        row=stale_row,
+        reference=reference,
+    )
+    final = submission_receipt_identity(
+        row=final_row,
+        reference=reference,
+    )
+
+    assert stale[0] != final[0]
+    assert stale[1] != final[1]
+    assert stale[2]["receipt_identity_version"] == 2
+    assert stale[2]["receipt_identity_kind"] == (
+        "game_stats_artifact"
+    )
+    assert stale[2]["game_stats_id"] == 20438
+    assert stale[2]["artifact_sha256"] == (
+        stale_row.replay_hash
+    )
+    assert final[2]["artifact_sha256"] == "b" * 64
+
+
 def test_submitter_uid_override_is_always_an_assertion() -> None:
     assert (
         resolve_submitter_uid_assertion(
