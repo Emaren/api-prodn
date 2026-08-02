@@ -1,5 +1,5 @@
 # app.py
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -61,9 +61,20 @@ def _game_identity_key(game: GameStats) -> str:
     return f"id:{game.id}"
 
 
+def _public_sort_datetime(value: datetime | None) -> datetime:
+    # Internal ordering only. Legacy source-local values remain naive. Absolute
+    # values are normalized to UTC and stripped of tzinfo solely so Python never
+    # compares aware and naive datetime objects. Public provenance is unchanged.
+    if value is None:
+        return datetime.min
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _public_match_sort_key(game: GameStats):
-    played_at = game.public_played_at() or datetime.min
-    parsed_at = game.timestamp or game.created_at or datetime.min
+    played_at = _public_sort_datetime(game.public_played_at())
+    parsed_at = _public_sort_datetime(game.timestamp or game.created_at)
     return (played_at, parsed_at, game.id or 0)
 
 
