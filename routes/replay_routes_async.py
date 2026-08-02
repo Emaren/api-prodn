@@ -1620,12 +1620,21 @@ def _should_refresh_reviewed_match(
     existing_key_events = getattr(existing_game, "key_events", {}) or {}
     existing_duration = _coerce_positive_int(getattr(existing_game, "duration", 0))
     incoming_duration = _coerce_positive_int(incoming_duration)
+    existing_result_trusted = _has_trusted_resolved_result(
+        existing_key_events
+    )
+    incoming_result_trusted = _has_trusted_resolved_result(
+        incoming_key_events
+    )
 
-    if (
-        _has_trusted_resolved_result(incoming_key_events)
-        and not _has_trusted_resolved_result(existing_key_events)
-    ):
+    if incoming_result_trusted and not existing_result_trusted:
         return True
+
+    # A later artifact may be longer while still lacking deterministic result
+    # evidence. Never let duration or event-count richness replace a trusted
+    # result with an unresolved projection.
+    if existing_result_trusted and not incoming_result_trusted:
+        return False
 
     if _key_event_bool(incoming_key_events, "postgame_available") and not _key_event_bool(
         existing_key_events, "postgame_available"
@@ -1658,6 +1667,61 @@ def _should_refresh_reviewed_match(
     existing_chat_count = _key_event_chat_count(existing_key_events)
     incoming_chat_count = _key_event_chat_count(incoming_key_events)
     return incoming_chat_count >= existing_chat_count + 3 and incoming_duration >= existing_duration + 30
+
+
+def _watcher_final_artifact_size(key_events: dict) -> int:
+    if not isinstance(key_events, dict):
+        return 0
+
+    watcher_upload = key_events.get("watcher_upload")
+
+    if not isinstance(watcher_upload, dict):
+        return 0
+
+    return _coerce_positive_int(
+        watcher_upload.get("file_size_bytes")
+    )
+
+
+def _should_advance_unresolved_reviewed_match_artifact(
+    existing_game,
+    incoming_replay_hash: Optional[str],
+    incoming_file_size: int,
+) -> bool:
+    # Artifact freshness and result authority are separate invariants.
+    # This lane advances only unresolved matches to strictly larger final bytes.
+    existing_hash = str(
+        getattr(existing_game, "replay_hash", "") or ""
+    ).strip().casefold()
+    incoming_hash = str(
+        incoming_replay_hash or ""
+    ).strip().casefold()
+
+    if (
+        not existing_hash
+        or not incoming_hash
+        or existing_hash == incoming_hash
+    ):
+        return False
+
+    existing_key_events = (
+        getattr(existing_game, "key_events", {}) or {}
+    )
+
+    if _has_trusted_resolved_result(existing_key_events):
+        return False
+
+    existing_file_size = _watcher_final_artifact_size(
+        existing_key_events
+    )
+    incoming_file_size = _coerce_positive_int(
+        incoming_file_size
+    )
+
+    return bool(
+        existing_file_size > 0
+        and incoming_file_size > existing_file_size
+    )
 
 
 async def _maybe_verify_user_from_replay(db, uploader_uid: str, players: list, claimed_name: Optional[str], method: str):
@@ -2503,38 +2567,67 @@ async def upload_replay_file(
                     platform_match_id,
                 )
                 if existing_platform_match and existing_platform_match.replay_hash != replay_hash:
-                    if _should_refresh_reviewed_match(
+                    semantic_refresh = _should_refresh_reviewed_match(
                         existing_platform_match,
                         duration,
                         key_events,
                         players,
                         event_types,
-                    ):
-                        existing_platform_match.user_uid = uploader_uid or existing_platform_match.user_uid
-                        existing_platform_match.replay_file = original_name
-                        existing_platform_match.replay_hash = replay_hash
-                        existing_platform_match.game_version = parsed.get("game_version")
-                        existing_platform_match.map = map_payload
-                        existing_platform_match.game_type = parsed.get("game_type")
-                        existing_platform_match.duration = duration
-                        existing_platform_match.game_duration = duration
-                        existing_platform_match.winner = winner
-                        existing_platform_match.players = players
-                        existing_platform_match.event_types = event_types
-                        existing_platform_match.key_events = key_events
-                        existing_platform_match.parse_iteration = parse_iteration
-                        existing_platform_match.is_final = True
-                        existing_platform_match.disconnect_detected = disconnect_detected
-                        existing_platform_match.parse_source = parse_source
-                        existing_platform_match.parse_reason = parse_reason
-                        existing_platform_match.original_filename = original_name
-                        existing_platform_match.timestamp = datetime.utcnow()
-                        if played_on is not None:
-                            existing_platform_match.played_on = played_on
+                    )
+                    artifact_identity_refresh = (
+                        _should_advance_unresolved_reviewed_match_artifact(
+                            existing_platform_match,
+                            replay_hash,
+                            written,
+                        )
+                    )
+
+                    if semantic_refresh or artifact_identity_refresh:
+                        _apply_parsed_upload_to_game(
+                            existing_platform_match,
+                            uploader_uid=uploader_uid,
+                            replay_hash=replay_hash,
+                            original_name=original_name,
+                            parsed=parsed,
+                            map_payload=map_payload,
+                            duration=duration,
+                            winner=winner,
+                            players=players,
+                            event_types=event_types,
+                            key_events=key_events,
+                            parse_iteration=parse_iteration,
+                            is_final_upload=True,
+                            disconnect_detected=disconnect_detected,
+                            parse_source=parse_source,
+                            parse_reason=parse_reason,
+                            played_on=played_on,
+                        )
 
                         if uploader_uid and uploader_uid != "system":
                             method = "watcher" if mode == "watcher" else "replay_upload"
                             await _maybe_verify_user_from_replay(db, uploader_uid, players, x_player_name, method)
+
+                        refresh_status = (
+                            "reviewed_match_refreshed"
+                            if semantic_refresh
+                            else "reviewed_match_artifact_advanced"
+                        )
+                        refresh_detail = (
+                            "Reviewed match refreshed with later, more complete final replay data."
+                            if semantic_refresh
+                            else (
+                                "Unresolved reviewed match advanced to strictly larger "
+                                "verified final replay bytes without authorizing result truth."
+                            )
+                        )
+                        refresh_message = (
+                            "Reviewed match refreshed with later final replay data."
+                            if semantic_refresh
+                            else (
+                                "Reviewed match advanced to the latest verified final "
+                                "replay artifact; result remains review-only."
+                            )
+                        )
 
                         await _record_parse_attempt(
                             db,
@@ -2542,8 +2635,8 @@ async def upload_replay_file(
                             replay_hash=replay_hash,
                             original_filename=original_name,
                             parse_source=parse_source,
-                            status="reviewed_match_refreshed",
-                            detail="Reviewed match refreshed with later, more complete final replay data.",
+                            status=refresh_status,
+                            detail=refresh_detail,
                             upload_mode=mode,
                             file_size_bytes=written,
                             game_stats_id=existing_platform_match.id,
@@ -2552,7 +2645,7 @@ async def upload_replay_file(
                         await db.commit()
                         return upload_finality(
                             {
-                                "message": "Reviewed match refreshed with later final replay data.",
+                                "message": refresh_message,
                                 "replay_hash": replay_hash,
                                 "platform_match_id": platform_match_id,
                                 "uploader_uid": uploader_uid,
@@ -2560,6 +2653,9 @@ async def upload_replay_file(
                                 "parse_iteration": parse_iteration,
                                 "is_final": True,
                                 "team_resolution": team_resolution,
+                                "artifact_identity_advanced": (
+                                    artifact_identity_refresh
+                                ),
                             },
                             finality_status=(
                                 FINALITY_REVIEWED_MATCH_REFRESHED
