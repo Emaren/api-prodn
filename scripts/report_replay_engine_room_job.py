@@ -47,6 +47,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def artifact_binding_summary(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    source_hash = str(
+        row.get("input_hash") or ""
+    ).strip().casefold()
+    current_hash = str(
+        row.get("current_replay_hash") or ""
+    ).strip().casefold()
+    matches_current = bool(
+        len(source_hash) == 64
+        and len(current_hash) == 64
+        and source_hash == current_hash
+    )
+
+    return {
+        "source_artifact_sha256": source_hash or None,
+        "current_replay_hash": current_hash or None,
+        "matches_current": matches_current,
+    }
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True, default=str) + "\n",
@@ -117,6 +139,7 @@ def _load_rows(connection: psycopg.Connection, job_id: int) -> list[dict[str, An
               run.*,
               game.original_filename,
               game.replay_file,
+              game.replay_hash AS current_replay_hash,
               game.winner AS current_winner,
               game.players AS current_players,
               game.key_events AS current_key_events,
@@ -198,10 +221,28 @@ def main() -> int:
             ),
         }
         summary = summarize_candidate(candidate, current)
+        binding = artifact_binding_summary(row)
+        summary["artifact_binding"] = binding
+        if not binding["matches_current"]:
+            summary["result_bucket"] = "stale_artifact_binding"
+            summary["promotion_lane"] = "stale_artifact_binding"
+            summary["settlement_evidence_eligible"] = False
         summary["event_sequence"] = int(row["event_sequence"])
         summaries.append(summary)
 
     aggregate = aggregate_candidate_summaries(summaries)
+    aggregate["artifact_binding"] = {
+        "current": sum(
+            1
+            for item in summaries
+            if item["artifact_binding"]["matches_current"]
+        ),
+        "stale": sum(
+            1
+            for item in summaries
+            if not item["artifact_binding"]["matches_current"]
+        ),
+    }
     aggregate["job"] = {
         "id": int(job["id"]),
         "job_identity_hash": job["job_identity_hash"],

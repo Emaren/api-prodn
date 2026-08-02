@@ -37,6 +37,11 @@ and zero failed. Historical failed runs are retained.
   and submitter UID must match the manifest. The submitter user is derived from
   that linked row, so a Jim manifest produces Jim-owned submission receipts
   even when the CSV has no `submitter_uid` column.
+- That validation is a submission-time snapshot, not a permanent cross-table
+  constraint. Any later report or effective projection must require
+  `replay_parse_runs.input_hash = game_stats.replay_hash`. A run linked to the
+  same game ID but different bytes is historical evidence only and is never
+  current result, statistic, or settlement evidence.
 - Submission receipts are cohort-independent: legacy parse attempt when
   available, otherwise linked `game_stats`, otherwise artifact + submitter.
   Overlapping Jim/full-vault jobs therefore reuse and validate the same

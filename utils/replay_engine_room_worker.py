@@ -279,7 +279,19 @@ def submission_receipt_identity(
         "receipt_identity_kind": identity_kind,
         "game_stats_id": reference.game_stats_id,
         "game_stats_linkage": (
-            "validated_replay_hash" if reference.game_stats_id is not None else None
+            "validated_replay_hash"
+            if reference.game_stats_id is not None
+            else None
+        ),
+        "game_stats_linkage_scope": (
+            "submission_time"
+            if reference.game_stats_id is not None
+            else None
+        ),
+        "game_stats_replay_hash_snapshot": (
+            row.replay_hash
+            if reference.game_stats_id is not None
+            else None
         ),
         "legacy_parse_attempt_id": reference.legacy_parse_attempt_id,
         "artifact_sha256": row.replay_hash,

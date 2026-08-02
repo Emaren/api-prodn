@@ -77,6 +77,29 @@ def _clean(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
+def require_current_artifact_binding(
+    row: Mapping[str, Any],
+) -> None:
+    # Reject a candidate run whose bytes are not current GameStats bytes.
+
+    current_hash = _clean(
+        row.get("replay_hash")
+    ).casefold()
+    candidate_hash = _clean(
+        row.get("input_hash")
+    ).casefold()
+
+    if (
+        len(current_hash) != 64
+        or len(candidate_hash) != 64
+        or candidate_hash != current_hash
+    ):
+        raise RuntimeError(
+            "candidate parse run is stale: "
+            "input_hash does not match current game_stats.replay_hash"
+        )
+
+
 def player_key(player: Mapping[str, Any]) -> str | None:
     steam_id = _clean(player.get("steam_id") or player.get("user_id"))
     if steam_id and steam_id.isdigit():
@@ -314,6 +337,8 @@ def load_plan_rows(
           SELECT * FROM replay_parse_runs candidate_run
           WHERE candidate_run.game_stats_id = game.id
             AND candidate_run.status = 'completed'
+            AND lower(candidate_run.input_hash) =
+                lower(game.replay_hash)
           ORDER BY candidate_run.completed_at DESC, candidate_run.id DESC
           LIMIT 1
         ) run ON TRUE
@@ -325,7 +350,10 @@ def load_plan_rows(
     found = {int(row["id"]) for row in rows}
     missing = sorted(set(game_ids) - found)
     if missing:
-        raise RuntimeError(f"games have no completed candidate run: {missing}")
+        raise RuntimeError(
+            "games have no completed exact-current-hash "
+            f"candidate run: {missing}"
+        )
 
     plans = []
     for raw_row in rows:
