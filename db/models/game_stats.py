@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import os, json
 from pprint import pformat
 from logging import getLogger
@@ -57,19 +57,63 @@ class GameStats(Base):
                 return parsed
         return None
 
+    def _key_events_dict(self):
+        if isinstance(self.key_events, dict):
+            return self.key_events
+        if isinstance(self.key_events, str):
+            try:
+                parsed = json.loads(self.key_events)
+            except Exception:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    def _watcher_file_mtime_utc(self):
+        watcher_upload = self._key_events_dict().get("watcher_upload")
+        if not isinstance(watcher_upload, dict):
+            return None
+        raw_value = watcher_upload.get("file_mtime_ms")
+        try:
+            milliseconds = int(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if milliseconds <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    @staticmethod
+    def _utc_iso(value):
+        if value is None:
+            return None
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return aware.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def public_played_at_details(self):
+        watcher_mtime = self._watcher_file_mtime_utc()
+        if watcher_mtime is not None:
+            return watcher_mtime, "watcher_file_mtime", True
+        if self.played_on is not None:
+            return self.played_on, "played_on_source_local", self.played_on.tzinfo is not None
+        filename_time = self._filename_played_on()
+        if filename_time is not None:
+            return filename_time, "filename_source_local", filename_time.tzinfo is not None
+        if self.created_at is not None:
+            return self.created_at, "created_at_utc", True
+        if self.timestamp is not None:
+            return self.timestamp, "timestamp_utc", True
+        return None, "missing", False
+
     def public_played_at(self):
-        return (
-            self.played_on
-            or self._filename_played_on()
-            or self.created_at
-            or self.timestamp
-        )
+        return self.public_played_at_details()[0]
 
     def to_dict(self):
         logger = getLogger(__name__)
         trace_enabled = os.getenv("ENABLE_TRACE_LOGS", "false").lower() == "true"
         derived_played_on = self._filename_played_on()
-        played_at = self.played_on or derived_played_on or self.created_at or self.timestamp
+        played_at, played_at_source, played_at_is_absolute = self.public_played_at_details()
 
         try:
             map_data = json.loads(self.map) if isinstance(self.map, str) else self.map
@@ -152,11 +196,18 @@ class GameStats(Base):
             "players": players,
             "event_types": event_types,
             "key_events": key_events,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "created_at": self._utc_iso(self.created_at),
+            "timestamp": self._utc_iso(self.timestamp),
             "derived_played_on": derived_played_on.isoformat() if derived_played_on else None,
             "played_on": self.played_on.isoformat() if self.played_on else None,
-            "played_at": played_at.isoformat() if played_at else None,
+            "played_at": (
+                self._utc_iso(played_at)
+                if played_at and played_at_is_absolute
+                else played_at.isoformat() if played_at else None
+            ),
+            "played_at_source": played_at_source,
+            "played_at_is_absolute": played_at_is_absolute,
+            "watcher_file_mtime": self._utc_iso(self._watcher_file_mtime_utc()),
             "parse_iteration": self.parse_iteration,
             "is_final": self.is_final,
             "disconnect_detected": self.disconnect_detected,
