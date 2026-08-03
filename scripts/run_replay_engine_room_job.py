@@ -89,7 +89,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--submitter-uid",
-        help="optional assertion; DB-linked game_stats UID remains authoritative",
+        help=(
+            "optional submitter assertion; canonical game ownership or validated "
+            "legacy alternate-perspective evidence remains authoritative"
+        ),
     )
     parser.add_argument("--requested-by-uid")
     parser.add_argument("--worker-key")

@@ -60,6 +60,11 @@ REQUIRED_ENGINE_ROOM_TABLES = {
     "replay_reprocess_jobs",
     "replay_reprocess_job_events",
 }
+ALTERNATE_PERSPECTIVE_ATTEMPT_STATUSES = {
+    "duplicate_reviewed_match",
+    "reviewed_match_artifact_advanced",
+    "reviewed_match_refreshed",
+}
 TERMINAL_JOB_EVENTS = {"completed", "failed", "cancelled"}
 API_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_CANDIDATE_CLI = API_ROOT / "scripts" / "parse_replay_candidate.py"
@@ -159,6 +164,8 @@ class ManifestReference:
     legacy_parse_attempt_id: int | None
     submitter_user_id: int | None
     submitter_uid: str | None
+    game_stats_linkage: str | None = None
+    game_stats_replay_hash_snapshot: str | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,55 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def stable_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def resolve_game_stats_artifact_linkage(
+    *,
+    game_stats_id: int,
+    game_replay_hash: str | None,
+    game_is_final: bool,
+    manifest_replay_hash: str,
+    legacy_parse_attempt_id: int | None,
+    legacy_attempt_game_stats_id: int | None,
+    legacy_attempt_replay_hash: str | None,
+    legacy_attempt_status: str | None,
+) -> tuple[str, bool]:
+    """Validate canonical or reviewed alternate-artifact game linkage.
+
+    The boolean return value says whether the canonical game owner UID is also
+    a submitter assertion. Alternate participant recordings deliberately do
+    not inherit the canonical recording owner's identity.
+    """
+
+    normalized_game_hash = str(game_replay_hash or "").casefold()
+    normalized_manifest_hash = manifest_replay_hash.casefold()
+
+    if normalized_game_hash == normalized_manifest_hash:
+        return "validated_replay_hash", True
+
+    normalized_attempt_hash = str(
+        legacy_attempt_replay_hash or ""
+    ).casefold()
+    normalized_attempt_status = str(
+        legacy_attempt_status or ""
+    ).casefold()
+
+    alternate_is_valid = (
+        game_is_final
+        and legacy_parse_attempt_id is not None
+        and legacy_attempt_game_stats_id == game_stats_id
+        and normalized_attempt_hash == normalized_manifest_hash
+        and normalized_attempt_status
+        in ALTERNATE_PERSPECTIVE_ATTEMPT_STATUSES
+    )
+
+    if alternate_is_valid:
+        return "validated_reviewed_match_alternate_artifact", False
+
+    raise ReconciliationError(
+        "manifest replay hash differs from game_stats without a validated "
+        "reviewed-match alternate artifact receipt"
+    )
 
 
 def resolve_submitter_uid_assertion(
@@ -285,9 +341,12 @@ def submission_receipt_identity(
         "receipt_identity_kind": identity_kind,
         "game_stats_id": reference.game_stats_id,
         "game_stats_linkage": (
-            "validated_replay_hash"
-            if reference.game_stats_id is not None
-            else None
+            reference.game_stats_linkage
+            or (
+                "validated_replay_hash"
+                if reference.game_stats_id is not None
+                else None
+            )
         ),
         "game_stats_linkage_scope": (
             "submission_time"
@@ -295,9 +354,12 @@ def submission_receipt_identity(
             else None
         ),
         "game_stats_replay_hash_snapshot": (
-            row.replay_hash
-            if reference.game_stats_id is not None
-            else None
+            reference.game_stats_replay_hash_snapshot
+            or (
+                row.replay_hash
+                if reference.game_stats_id is not None
+                else None
+            )
         ),
         "legacy_parse_attempt_id": reference.legacy_parse_attempt_id,
         "artifact_sha256": row.replay_hash,
@@ -1164,7 +1226,7 @@ class EngineRoomRepository:
         if game_ids:
             found = self.connection.execute(
                 """
-                SELECT id, user_uid, replay_hash
+                SELECT id, user_uid, replay_hash, is_final
                 FROM game_stats
                 WHERE id = ANY(%s)
                 """,
@@ -1181,7 +1243,7 @@ class EngineRoomRepository:
         if attempt_ids:
             found = self.connection.execute(
                 """
-                SELECT id, user_uid, replay_hash, game_stats_id
+                SELECT id, user_uid, replay_hash, game_stats_id, status
                 FROM replay_parse_attempts
                 WHERE id = ANY(%s)
                 """,
@@ -1227,12 +1289,6 @@ class EngineRoomRepository:
             attempt_uid = str(attempt.get("user_uid") or "") if attempt else ""
             declared_uid = row.submitter_uid
 
-            if game:
-                database_hash = str(game.get("replay_hash") or "").casefold()
-                if database_hash != row.replay_hash:
-                    raise ReconciliationError(
-                        f"manifest row {row.ordinal} replay hash does not match game_stats"
-                    )
             if attempt:
                 attempt_hash = str(attempt.get("replay_hash") or "").casefold()
                 if attempt_hash != row.replay_hash:
@@ -1249,8 +1305,51 @@ class EngineRoomRepository:
                         f"manifest row {row.ordinal} attempt/game_stats link differs"
                     )
 
+            game_stats_linkage = None
+            game_stats_replay_hash_snapshot = None
+            game_uid_assertion = game_uid or None
+            if game:
+                game_stats_replay_hash_snapshot = str(
+                    game.get("replay_hash") or ""
+                ).casefold() or None
+                try:
+                    (
+                        game_stats_linkage,
+                        game_owner_is_submitter_assertion,
+                    ) = resolve_game_stats_artifact_linkage(
+                        game_stats_id=int(game["id"]),
+                        game_replay_hash=game.get("replay_hash"),
+                        game_is_final=bool(game.get("is_final")),
+                        manifest_replay_hash=row.replay_hash,
+                        legacy_parse_attempt_id=(
+                            row.legacy_parse_attempt_id
+                        ),
+                        legacy_attempt_game_stats_id=(
+                            int(attempt["game_stats_id"])
+                            if attempt
+                            and attempt.get("game_stats_id") is not None
+                            else None
+                        ),
+                        legacy_attempt_replay_hash=(
+                            str(attempt.get("replay_hash") or "")
+                            if attempt
+                            else None
+                        ),
+                        legacy_attempt_status=(
+                            str(attempt.get("status") or "")
+                            if attempt
+                            else None
+                        ),
+                    )
+                except ReconciliationError as error:
+                    raise ReconciliationError(
+                        f"manifest row {row.ordinal} {error}"
+                    ) from error
+                if not game_owner_is_submitter_assertion:
+                    game_uid_assertion = None
+
             derived_uid = resolve_submitter_uid_assertion(
-                game_stats_uid=game_uid or None,
+                game_stats_uid=game_uid_assertion,
                 legacy_attempt_uid=attempt_uid or None,
                 manifest_uid=declared_uid,
                 override_uid=submitter_uid_override,
@@ -1265,6 +1364,10 @@ class EngineRoomRepository:
                 legacy_parse_attempt_id=row.legacy_parse_attempt_id,
                 submitter_user_id=user_rows.get(derived_uid) if derived_uid else None,
                 submitter_uid=derived_uid or None,
+                game_stats_linkage=game_stats_linkage,
+                game_stats_replay_hash_snapshot=(
+                    game_stats_replay_hash_snapshot
+                ),
             )
         return result
 
