@@ -19,7 +19,7 @@ Repository ID: `api-prodn`
 
 Documentation owner: `aoe2war-api`
 
-Implementation baseline: `main` at `eba740d366d34f85a9023307cd935ba0ec368758`
+Implementation baseline: `main` at `458f4f80bb6d91fb8e39f260d4bf8ece501a72ee`
 
 The implementation baseline identifies the code commit described by this documentation. Documentation-only commits may follow it without creating a self-referential registry hash.
 
