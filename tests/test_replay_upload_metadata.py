@@ -27,9 +27,15 @@ from routes.replay_routes_async import (
 
 def test_finality_response_exposes_retry_and_completeness_contract():
     live = _finality_response(
-        {"is_final": False, "players_count": 8, "winner": "Unknown"},
+        {
+            "game_id": 21053,
+            "is_final": False,
+            "players_count": 8,
+            "winner": "Unknown",
+        },
         finality_status="live",
     )
+    assert live["game_id"] == 21053
     assert live["parse_completeness"] == "live_roster"
     assert live["should_continue_monitoring"] is True
     assert live["betting_eligible"] is False
@@ -94,6 +100,21 @@ def test_finality_response_exposes_retry_and_completeness_contract():
     assert final["should_continue_monitoring"] is False
     assert final["betting_eligible"] is True
 
+
+
+def test_every_upload_finality_return_supplies_exact_game_stats_id():
+    source = Path(replay_routes.__file__).read_text()
+    calls = source.split("return upload_finality(")[1:]
+
+    assert len(calls) == 11
+
+    for call in calls:
+        argument_block = call.split(
+            "finality_status=",
+            1,
+        )[0]
+
+        assert "game_stats_id=" in argument_block
 
 def test_upload_identity_transaction_is_released_before_parsing(monkeypatch):
     events = []

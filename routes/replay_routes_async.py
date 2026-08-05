@@ -2022,8 +2022,20 @@ async def upload_replay_file(
 
             def upload_finality(
                 payload: dict,
+                *,
+                game_stats_id: int,
                 **kwargs,
             ):
+                if (
+                    not isinstance(game_stats_id, int)
+                    or isinstance(game_stats_id, bool)
+                    or game_stats_id <= 0
+                ):
+                    raise RuntimeError(
+                        "Replay finality response requires "
+                        "an exact positive game_stats_id"
+                    )
+
                 recovery_queued = bool(
                     is_final_upload
                     and archive_verified
@@ -2031,6 +2043,7 @@ async def upload_replay_file(
 
                 enriched_payload = {
                     **payload,
+                    "game_id": game_stats_id,
                     "is_final": is_final_upload,
                     "file_role": (
                         role_contract["file_role"]
@@ -2189,6 +2202,7 @@ async def upload_replay_file(
                             "parse_iteration": parse_iteration,
                             "is_final": False,
                         },
+                        game_stats_id=existing_placeholder_live.id,
                         finality_status=FINALITY_LIVE_PENDING_PARSE,
                         pending_parse=True,
                         raw_replay_archived=bool(raw_replay_archive_path),
@@ -2246,6 +2260,7 @@ async def upload_replay_file(
                                 "parse_iteration": parse_iteration,
                                 "is_final": True,
                             },
+                            game_stats_id=existing_final_game.id,
                             finality_status=FINALITY_FINAL_UNPARSED_PROOF,
                             unparsed_final=True,
                             raw_replay_archived=bool(raw_replay_archive_path),
@@ -2325,6 +2340,7 @@ async def upload_replay_file(
                             "parse_iteration": parse_iteration,
                             "is_final": True,
                         },
+                        game_stats_id=target_game.id,
                         finality_status=FINALITY_FINAL_UNPARSED_PROOF,
                         unparsed_final=True,
                         raw_replay_archived=bool(raw_replay_archive_path),
@@ -2455,6 +2471,7 @@ async def upload_replay_file(
                             "is_final": False,
                             "team_resolution": team_resolution,
                         },
+                        game_stats_id=existing_placeholder_live.id,
                         finality_status=FINALITY_LIVE,
                         raw_replay_archived=bool(raw_replay_archive_path),
                     )
@@ -2517,6 +2534,7 @@ async def upload_replay_file(
                             "is_final": True,
                             "team_resolution": team_resolution,
                         },
+                        game_stats_id=existing_final_game.id,
                         finality_status=(
                             FINALITY_TRUSTED_FINAL_REFRESHED
                             if final_result_trusted
@@ -2551,6 +2569,7 @@ async def upload_replay_file(
                         "is_final": True,
                         "team_resolution": team_resolution,
                     },
+                    game_stats_id=existing_final_game.id,
                     finality_status=(
                         FINALITY_TRUSTED_FINAL_DUPLICATE
                         if final_result_trusted
@@ -2661,6 +2680,7 @@ async def upload_replay_file(
                                     artifact_identity_refresh
                                 ),
                             },
+                            game_stats_id=existing_platform_match.id,
                             finality_status=(
                                 FINALITY_REVIEWED_MATCH_REFRESHED
                                 if final_result_trusted
@@ -2696,6 +2716,7 @@ async def upload_replay_file(
                             "is_final": True,
                             "team_resolution": team_resolution,
                         },
+                        game_stats_id=existing_platform_match.id,
                         finality_status=(
                             FINALITY_REVIEWED_MATCH_DUPLICATE
                             if final_result_trusted
@@ -2760,6 +2781,7 @@ async def upload_replay_file(
                                 "is_final": False,
                                 "team_resolution": team_resolution,
                             },
+                            game_stats_id=existing_live_game.id,
                             finality_status=FINALITY_LIVE,
                             raw_replay_archived=bool(raw_replay_archive_path),
                         )
@@ -2790,6 +2812,7 @@ async def upload_replay_file(
                             "is_final": False,
                             "team_resolution": team_resolution,
                         },
+                        game_stats_id=existing_live_game.id,
                         finality_status=FINALITY_LIVE,
                         raw_replay_archived=bool(raw_replay_archive_path),
                     )
@@ -2911,6 +2934,7 @@ async def upload_replay_file(
                 "is_final": is_final_upload,
                 "team_resolution": team_resolution,
             },
+            game_stats_id=game.id,
             finality_status=(
                 FINALITY_TRUSTED_FINAL
                 if final_result_trusted

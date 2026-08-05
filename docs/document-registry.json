@@ -11,9 +11,9 @@
       "owner": "aoe2war-api",
       "path": "README.md",
       "review_interval_days": 60,
-      "reviewed_at": "2026-07-26",
+      "reviewed_at": "2026-08-04",
       "sensitivity": "internal",
-      "sha256": "f544a47201e14e12b258906442f2c6b7848c7d33ae53b3b80b1884a79325b36e",
+      "sha256": "0f3e47d19e3210e0eaeab615d8cd33b85b9af12b206d0688e99b73da3f03516a",
       "source_of_truth": "git",
       "status": "active",
       "systems": [
@@ -33,9 +33,9 @@
       "owner": "aoe2war-api",
       "path": "TESTING.md",
       "review_interval_days": 60,
-      "reviewed_at": "2026-07-26",
+      "reviewed_at": "2026-08-04",
       "sensitivity": "internal",
-      "sha256": "a559e1b3cb3ef9ec7af073f72b5eadf39aeaf84cdb4b412b06cead3d8eb8e510",
+      "sha256": "e3e22f8d46d36bc1a7e7396f82e6232486e829504436eb68db88e565cc409d5a",
       "source_of_truth": "git",
       "status": "active",
       "systems": [
@@ -78,7 +78,7 @@
       "review_interval_days": 0,
       "reviewed_at": "2026-07-26",
       "sensitivity": "internal",
-      "sha256": "e08b6a09633c4d3b15aded20544d7a0fb8101421d2b8fd375da67d3d73ef1ccc",
+      "sha256": "5efbcf16b9bca49db26fd4edc0216ad5b9b37e9af6d30ea71c7b917ef4d197dc",
       "source_of_truth": "generated",
       "status": "generated",
       "systems": [
@@ -113,7 +113,7 @@
   "generated_at": "2026-08-04T02:09:37Z",
   "implementation_baseline": {
     "branch": "main",
-    "commit": "eba740d366d34f85a9023307cd935ba0ec368758"
+    "commit": "458f4f80bb6d91fb8e39f260d4bf8ece501a72ee"
   },
   "owner": "aoe2war-api",
   "repo": "api-prodn",

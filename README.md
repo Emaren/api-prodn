@@ -8,7 +8,7 @@ systems: ["app-prodn","api-prodn"]
 audience: ["developers","operators","ai-agents"]
 source_of_truth: "git"
 authority: "repository-entrypoint"
-reviewed_at: "2026-07-26"
+reviewed_at: "2026-08-04"
 review_interval_days: 60
 sensitivity: "internal"
 ---
@@ -29,7 +29,7 @@ The VPS remote-head probe may be unavailable when the production SSH alias is no
 
 ## Replay completeness and finality contract
 
-Watcher responses expose `raw_replay_archived`, `artifact_accepted`, `parse_completed`, `final_submission_received`, `result_resolved`, `result_trusted`, `stats_eligible`, and `betting_eligible` as separate facts. The legacy `final_accepted` and `should_settle` fields remain settlement signals, not artifact-upload signals. Parse-completeness classes are `live_header`, `live_roster`, `final_result_only`, `final_unparsed_proof`, and `final_unsafe`.
+Watcher responses expose `game_id`, `raw_replay_archived`, `artifact_accepted`, `parse_completed`, `final_submission_received`, `result_resolved`, `result_trusted`, `stats_eligible`, and `betting_eligible` as separate facts. `game_id` is the exact positive `game_stats.id` stored or refreshed for that response. The app uses it to run idempotent post-ingest result and public identity projection; replay hash alone is not the post-ingest row selector. The legacy `final_accepted` and `should_settle` fields remain settlement signals, not artifact-upload signals. Parse-completeness classes are `live_header`, `live_roster`, `final_result_only`, `final_unparsed_proof`, and `final_unsafe`.
 
 `final_recorded`, `final_recorded_duplicate`, and `final_recorded_refreshed` mean that final replay bytes were archived and the parsed game/result candidate was stored, but the result is not authorized for automatic settlement. Watchers should count these as archived/parsed and routed for correction, not as failed uploads and not as trusted finals. Only `trusted_final*` or `reviewed_match*` with `should_settle=true` permits the settlement path.
 
