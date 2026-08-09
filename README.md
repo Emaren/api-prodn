@@ -40,6 +40,14 @@ window can exhaust the async SQLAlchemy connection pool during an upload burst.
 Keep archive verification and finality semantics unchanged, but do not move
 `parse_replay_full` back inside a checked-out identity transaction.
 
+Direct API uploads hand their exact durable receipt to the web-owned post-ingest
+coordinator after commit. The bridge is a bounded background retry (three
+attempts by default, four maximum) and the coordinator is idempotent; web-proxy
+uploads declare themselves as the post-ingest owner so the same receipt is not
+coordinated twice. The recurring app recovery timer separately revisits a small
+batch of recent exact-parser finals that still lack an accepted public identity
+projection or result, without rerunning the parser.
+
 Trusted finality—not HTTP success—allows settlement. Disconnect/desync evidence, parser failure, watcher interruption, and silent disappearance are distinct. Unsafe winners never become betting eligible. Missing postgame/achievement values remain absent rather than becoming zeroes.
 
 `utils/replay_team_contract.py` is the canonical replay-player boundary. It normalizes alternate parser names once and preserves replay-observed name, Steam ID, civilization, color, position, explicit team ID (including valid team `0`), player number, winner flag, score, rating snapshot, EAPM, and achievements when present. It never infers team membership from array order. Team games resolve only with exactly two complete equal-size explicit teams. Because HD can flip winner/completion flags after the first teammate resignation, resignation proof resolves a team result only when exactly one full explicit team resigned; the opposing explicit team is then the derived winner. No fully resigned team, both teams resigned, partial resignation, or conflicting flags remain review-only unless independent postgame/scoreboard proof resolves them. `winning_team_id`, `winning_player_keys`, result provenance, confidence, and evidence are stored in `key_events.result_resolution` alongside `key_events.team_resolution`. The legacy scalar `winner` field never establishes team settlement truth.
@@ -100,6 +108,7 @@ Production FastAPI backend for AoE2HDBets.
 - returns final replay rows for public match surfaces
 - orders recent matches by canonical `played_at`, not mutable parse/update bookkeeping timestamps
 - payload includes `played_at`, `played_on`, `derived_played_on`, `created_at`, and `timestamp`
+- caches at most 12 limit variants in a deterministic in-process LRU, invalidates all variants after every durable final commit, and generation-checks refills so a pre-invalidation DB query cannot republish stale truth
 
 ## Local development
 
@@ -123,6 +132,10 @@ Required:
 Optional/common:
 
 - `INTERNAL_API_KEY`
+- `AOE2_WEB_REPLAY_POST_INGEST_URL` (default: `http://127.0.0.1:3030/api/replay/post-ingest`)
+- `AOE2_WEB_REPLAY_POST_INGEST_MAX_ATTEMPTS` (default: `3`, bounded to `1..4`)
+- `AOE2_WEB_REPLAY_POST_INGEST_TIMEOUT_SECONDS` (default: `5`, bounded to `1..10` per attempt)
+- `AOE2_WEB_REPLAY_POST_INGEST_RETRY_BASE_SECONDS` (default: `0.25`, bounded to `0..2`)
 - `MAX_REPLAY_UPLOAD_BYTES`
 - `CHAIN_ID`
 - `ALLOWED_ORIGINS`

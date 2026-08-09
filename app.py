@@ -11,6 +11,10 @@ import time
 
 from db.db import init_db_async, get_db
 from db.models import GameStats
+from utils.game_stats_public_cache import (
+    read_game_stats_cache_generation,
+    write_game_stats_cache,
+)
 
 # Core + user routes are always enabled.
 from routes import (
@@ -31,7 +35,6 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("aoe2hdbets.api")
 
 _GAME_STATS_CACHE_TTL_SECONDS = float(os.getenv("AOE2_GAME_STATS_CACHE_TTL_SECONDS", "90"))
-_GAME_STATS_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
 
 
@@ -163,11 +166,10 @@ async def get_game_stats(
     db_gen=Depends(get_db),
 ):
     cache_key = f"limit:{limit or 'all'}"
-    now = time.monotonic()
-    cached = _GAME_STATS_CACHE.get(cache_key)
+    cache_lookup = read_game_stats_cache_generation(cache_key)
 
-    if cached and cached[0] > now:
-        return cached[1]
+    if cache_lookup.payload is not None:
+        return cache_lookup.payload
 
     try:
         async with db_gen as db:
@@ -193,18 +195,19 @@ async def get_game_stats(
             selected_games = ordered_games[:limit] if limit else ordered_games
             payload = [g.to_dict() for g in selected_games]
 
-            _GAME_STATS_CACHE[cache_key] = (
-                time.monotonic() + _GAME_STATS_CACHE_TTL_SECONDS,
+            cache_written = write_game_stats_cache(
+                cache_key,
                 payload,
+                _GAME_STATS_CACHE_TTL_SECONDS,
+                expected_generation=cache_lookup.generation,
             )
 
-            if len(_GAME_STATS_CACHE) > 12:
-                stale_keys = [
-                    key for key, value in _GAME_STATS_CACHE.items()
-                    if value[0] <= time.monotonic()
-                ]
-                for key in stale_keys:
-                    _GAME_STATS_CACHE.pop(key, None)
+            if not cache_written:
+                logging.getLogger(__name__).info(
+                    "Skipped stale public game-stats cache refill key=%s generation=%s",
+                    cache_key,
+                    cache_lookup.generation,
+                )
 
             logging.getLogger(__name__).info(
                 f"📊 Returning {len(payload)} of {len(unique_games)} unique games from DB"

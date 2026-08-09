@@ -1,4 +1,13 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, Header, UploadFile, File
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    HTTPException,
+    Depends,
+    Query,
+    Header,
+    UploadFile,
+    File,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from db.db import get_db
@@ -26,6 +35,8 @@ except Exception:  # pragma: no cover
 
 from utils.replay_parser import parse_replay_full, hash_replay_file
 from utils.extract_datetime import extract_datetime_from_filename
+from utils.game_stats_public_cache import invalidate_game_stats_cache
+from utils.replay_post_ingest_bridge import notify_replay_post_ingest
 from utils.replay_team_contract import canonicalize_replay_players, resolve_replay_teams
 
 router = APIRouter(prefix="/api", tags=["replay"])
@@ -1848,6 +1859,7 @@ async def parse_new_replay(
 
 @router.post("/replay/upload")
 async def upload_replay_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db_gen=Depends(get_db),
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
@@ -1868,6 +1880,7 @@ async def upload_replay_file(
     x_file_size_bytes: Optional[str] = Header(default=None, alias="x-file-size-bytes"),
     x_file_mtime_ms: Optional[str] = Header(default=None, alias="x-file-mtime-ms"),
     x_final_candidate: Optional[str] = Header(default=None, alias="x-final-candidate"),
+    x_post_ingest_owner: Optional[str] = Header(default=None, alias="x-post-ingest-owner"),
 ):
     original_name = file.filename or "replay.aoe2record"
     suffix = Path(original_name).suffix.lower()
@@ -2112,10 +2125,26 @@ async def upload_replay_file(
                     ),
                 }
 
-                return _finality_response(
+                finality_response = _finality_response(
                     enriched_payload,
                     **kwargs,
                 )
+
+                if is_final_upload:
+                    invalidated = invalidate_game_stats_cache()
+                    logging.getLogger(__name__).info(
+                        "Invalidated public game-stats cache variants=%s game_id=%s",
+                        invalidated,
+                        game_stats_id,
+                    )
+
+                if (x_post_ingest_owner or "").strip().lower() != "web_proxy":
+                    background_tasks.add_task(
+                        notify_replay_post_ingest,
+                        finality_response,
+                    )
+
+                return finality_response
             parse_source_hint, _ = _derive_upload_parse_metadata(
                 upload_mode=mode,
                 is_final=is_final_upload,
