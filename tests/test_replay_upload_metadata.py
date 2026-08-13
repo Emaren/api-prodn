@@ -986,3 +986,30 @@ def test_finality_response_exposes_recovery_contract():
     assert response["safe_public_status"] == (
         "Final replay secured; automatic recovery queued"
     )
+
+
+def test_upload_identity_does_not_write_api_key_last_used_at():
+    source = Path(replay_routes.__file__).read_text()
+
+    function_body = source.split(
+        "async def _resolve_upload_identity",
+        1,
+    )[1].split(
+        "async def _load_user_by_uid",
+        1,
+    )[0]
+
+    assert "api_key.last_used_at =" not in function_body
+
+
+
+def test_replay_upload_admission_zero_disables_limit():
+    source = (
+        Path(__file__).resolve().parents[1] / "app.py"
+    ).read_text()
+
+    assert (
+        'int(os.getenv("AOE2_REPLAY_UPLOAD_MAX_INFLIGHT", "0"))'
+        in source
+    )
+    assert "_REPLAY_UPLOAD_MAX_INFLIGHT > 0" in source

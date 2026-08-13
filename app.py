@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from sqlalchemy.future import select
 import json
 import logging
@@ -106,6 +107,55 @@ def _env_bool(name: str, default: bool = False) -> bool:
 LOG_REQUESTS = _env_bool("LOG_REQUESTS", default=False)
 ALLOWED_ORIGINS = _parse_allowed_origins()
 
+_REPLAY_UPLOAD_MAX_INFLIGHT = max(
+    0,
+    int(os.getenv("AOE2_REPLAY_UPLOAD_MAX_INFLIGHT", "0")),
+)
+
+
+class ReplayUploadAdmissionMiddleware:
+    """Fail fast before multipart parsing when replay ingestion is saturated."""
+
+    def __init__(self, app):
+        self.app = app
+        self.inflight = 0
+
+    async def __call__(self, scope, receive, send):
+        is_replay_upload = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == "/api/replay/upload"
+        )
+
+        if not is_replay_upload:
+            await self.app(scope, receive, send)
+            return
+
+        if (
+            _REPLAY_UPLOAD_MAX_INFLIGHT > 0
+            and self.inflight >= _REPLAY_UPLOAD_MAX_INFLIGHT
+        ):
+            response = JSONResponse(
+                {
+                    "detail": "Replay ingestion busy; retry shortly.",
+                    "retryable": True,
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": "5",
+                    "Connection": "close",
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        self.inflight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.inflight -= 1
+
+
 class LogRequestMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not LOG_REQUESTS:
@@ -125,6 +175,7 @@ class LogRequestMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI()
 app.add_middleware(LogRequestMiddleware)
+app.add_middleware(ReplayUploadAdmissionMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

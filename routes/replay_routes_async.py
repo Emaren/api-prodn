@@ -1170,9 +1170,10 @@ async def _resolve_upload_identity(db, x_api_key: Optional[str], claimed_uid: st
     if not user:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # Touch last_used_at
-    api_key.last_used_at = datetime.utcnow()
-
+    # last_used_at is observational telemetry, not authentication correctness.
+    # Do not synchronously update this hot row for every replay upload.
+    # Concurrent watcher uploads can serialize on api_keys.last_used_at and
+    # exhaust the API SQLAlchemy connection pool.
     return user.uid, "watcher"
 
 
